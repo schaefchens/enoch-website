@@ -4,10 +4,11 @@ namespace Enoch;
 
 final class Engine {
     public function __construct(private Config $config,private Store $store,private Cloud $cloud,private Host $host) {}
-    public function enqueue(string $service,string $operation,string $actor): string {
+    public function enqueue(string $service,string $operation,string $actor,array $options=[]): string {
         if(!isset($this->config->services[$service])||!in_array($operation,['start','stop'],true))throw new \RuntimeException('Unknown service or operation.');
+        $options=(new Lifecycle($this->cloud))->normalize($options,$operation,$this->config->services[$service]);
         $id=bin2hex(random_bytes(12));$now=time();
-        try{$this->store->query("INSERT INTO jobs(id,service,operation,status,phase,phase_since,created,updated,actor,message) VALUES(?,?,?,'active','queued',?,?,?,?,?)",[$id,$service,$operation,$now,$now,$now,$actor,'Waiting to begin']);}
+        try{$this->store->query("INSERT INTO jobs(id,service,operation,status,phase,phase_since,created,updated,actor,message,data) VALUES(?,?,?,'active','queued',?,?,?,?,?,?)",[$id,$service,$operation,$now,$now,$now,$actor,'Waiting to begin',json_encode(['options'=>$options],JSON_THROW_ON_ERROR)]);}
         catch(\PDOException $e){if($this->store->query("SELECT id FROM jobs WHERE service=? AND status='active'",[$service])->fetch())throw new \RuntimeException('This server already has an operation in progress.');throw $e;}
         $this->store->audit($actor,$operation.' requested',$service);return $id;
     }
@@ -47,35 +48,45 @@ final class Engine {
         $age=time()-(int)$j['phase_since'];
         if($age>7200)throw new \RuntimeException('Operation paused too long. Inspect the retained server and snapshot, then retry.');
         $s=$this->pinned($j,$cfg);
+        $life=new Lifecycle($this->cloud);
+        $options=$j['data']['options']??[];
+        $save=$j['data']['save_snapshot']??true;
         switch($j['phase']) {
         case 'queued':
             $this->cloud->ips($cfg,$s);
             if($j['operation']==='start') {
                 if($s){
+                    if(($options['source']??'current')!=='current'||($options['type']??$cfg['type'])!==($s['server_type']['name']??$cfg['type'])||($options['save_snapshot']??true)===false)throw new \RuntimeException('Stop the existing VM before selecting a different restore profile.');
                     if($s['status']==='running'){$this->advance($j,'ready','Checking service health',['server'=>$s['id']]);return;}
                     if($s['status']!=='off')throw new \RuntimeException('Server is busy. Wait for it to settle before starting.');
                     $this->advance($j,'powering','Powering on',['server'=>$s['id']]);
                     $this->cloud->request('POST','/servers/'.$s['id'].'/actions/poweron');return;
                 }
-                $images=array_values(array_filter($this->cloud->images($cfg),fn($i)=>$i['status']==='available'));
-                $image=$images[0]??throw new \RuntimeException('No available managed snapshot. Install the server and create its first snapshot with the local script.');
-                $this->cloud->imageValid($image,$cfg);
-                $types=$this->cloud->all('server_types',['name'=>$cfg['type']]);$type=$types[0]??throw new \RuntimeException('Configured server type is unavailable.');
-                if($image['architecture']!==$type['architecture']||$image['disk_size']>$type['disk'])throw new \RuntimeException('Snapshot does not fit the configured server type.');
+                $options=$life->normalize($options,'start',$cfg);
+                $image=$life->restore($cfg,$options);
                 $firewall=$this->cloud->request('GET','/firewalls/'.$cfg['firewall']);
                 if(!isset($firewall['firewall']))throw new \RuntimeException('Configured firewall is missing.');
                 $userData=Provision::cloudInit($this->config,$cfg);
-                $this->advance($j,'creating','Restoring the latest snapshot',['image'=>$image['id']]);
+                $this->advance($j,'creating','Restoring the selected snapshot',['image'=>$image['id'],'save_snapshot'=>$options['save_snapshot']]);
                 $r=$this->cloud->request('POST','/servers',[
-                    'name'=>$cfg['name'],'server_type'=>$cfg['type'],'location'=>$cfg['location'],'image'=>$image['id'],
+                    'name'=>$cfg['name'],'server_type'=>$options['type'],'location'=>$cfg['location'],'image'=>$image['id'],
                     'ssh_keys'=>$cfg['ssh_keys'],'firewalls'=>[['firewall'=>$cfg['firewall']]],
                     'public_net'=>['enable_ipv4'=>true,'enable_ipv6'=>true,'ipv4'=>$cfg['ipv4'],'ipv6'=>$cfg['ipv6']],
-                    'labels'=>$cfg['labels']+['enoch-job'=>$j['id']], 'start_after_create'=>true,
+                    'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'enoch-save'=>$options['save_snapshot']?'yes':'no'], 'start_after_create'=>true,
                     'user_data'=>$userData,
                 ]);
                 if(isset($r['server']['id']))$this->advance($j,'creating','Waiting for the restored VM',['server'=>$r['server']['id']]);return;
             }
             if(!$s){$this->done($j,'Already stopped; no VM is allocated');return;}
+            $save=$options['save_snapshot']??(($s['labels']['enoch-save']??'yes')!=='no');
+            if(!$save&&empty($options['acknowledge_discard']))throw new \RuntimeException('This server is configured to discard changes. Confirm this before stopping.');
+            $data=['server'=>$s['id'],'save_snapshot'=>$save];
+            if(!$save)$data['fallback']=$life->current($cfg)['id'];
+            if($save){
+                $default=$this->cloud->all('server_types',['name'=>$cfg['type']])[0]??[];
+                if(($s['primary_disk_size']??$s['server_type']['disk']??0)>($default['disk']??0)&&empty($options['acknowledge_large_disk']))throw new \RuntimeException('Confirm that the new snapshot will require a larger server disk.');
+            }
+            $this->advance($j,'queued','Shutdown policy checked',$data);
             if(!in_array($s['status'],['running','off'],true))throw new \RuntimeException('Server is busy. Retry once its current action finishes.');
             if($s['status']==='off'){$this->advance($j,'snapshot','Server is off; preparing a snapshot',['server'=>$s['id']]);return;}
             if($cfg['prepare']==='aio'){$this->advance($j,'preparing','Stopping Nextcloud containers cleanly',['server'=>$s['id']]);return;}
@@ -120,9 +131,13 @@ final class Engine {
         case 'snapshot':
             if(!$s||$s['status']!=='off')throw new \RuntimeException('A snapshot requires the original VM to be powered off.');
             $this->cloud->ips($cfg,$s);
+            if(!$save){
+                $i=$this->cloud->request('GET','/images/'.$j['data']['fallback'])['image']??[];$this->cloud->imageValid($i,$cfg);
+                $this->advance($j,'delete','Discard confirmed; previous snapshot verified',['image'=>$i['id']]);return;
+            }
             $this->advance($j,'snapshotting','Saving a snapshot');
             $r=$this->cloud->request('POST','/servers/'.$s['id'].'/actions/create_image',[
-                'type'=>'snapshot','description'=>$cfg['name'].'-'.gmdate('Ymd-His').'-enoch',
+                'type'=>'snapshot','description'=>$cfg['name'].'-current-'.gmdate('Ymd-His'),
                 'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'generation'=>gmdate('Ymd-His')],
             ]);
             if(isset($r['image']['id']))$this->advance($j,'snapshotting','Waiting for snapshot verification',['image'=>$r['image']['id']]);return;
@@ -139,13 +154,15 @@ final class Engine {
             if(!$s||$s['status']!=='off')throw new \RuntimeException('Server is no longer powered off. No deletion attempted.');
             $this->cloud->ips($cfg,$s);
             $i=$this->cloud->request('GET','/images/'.$j['data']['image'])['image']??[];
-            $this->cloud->imageValid($i,$cfg,$s['id']);
-            if(($i['labels']['enoch-job']??'')!==$j['id'])throw new \RuntimeException('Snapshot does not belong to this operation.');
+            $this->cloud->imageValid($i,$cfg,$save?$s['id']:null);
+            if($save&&($i['labels']['enoch-job']??'')!==$j['id'])throw new \RuntimeException('Snapshot does not belong to this operation.');
             $this->advance($j,'deleting','Releasing VM; keeping IPs and snapshots');
             $this->cloud->request('DELETE','/servers/'.$s['id']);return;
         case 'deleting':
-            if(!$s){$this->done($j,'Stopped and saved; VM released');return;}
+            if(!$s){if($save)$this->advance($j,'pruning','VM released; retaining the initial and current snapshots');else $this->done($j,'Stopped without saving; previous snapshots retained');return;}
             if($age>300)throw new \RuntimeException('Deletion was not confirmed. The verified snapshot is retained. Inspect Hetzner before retrying.');return;
+        case 'pruning':
+            if(!$life->pruneOne($cfg,(int)$j['data']['image']))$this->done($j,'Stopped and saved; initial and current snapshots retained');return;
         default:throw new \RuntimeException('Unknown operation phase.');
         }
     }
@@ -165,7 +182,7 @@ final class Engine {
         try{$servers=$this->cloud->all('servers');}catch(\Throwable $e){$servers=[];$serverError=$e;}
         foreach($this->config->services as $id=>$cfg){
             try{if($serverError)throw $serverError;$s=$this->cloud->server($cfg,$servers);$images=$this->cloud->images($cfg);$latest=null;foreach($images as $image)if($image['status']==='available'){$latest=$image;break;}
-                $cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>$s['status']??'saved','type'=>$s['server_type']['name']??$cfg['type'],'location'=>$cfg['location'],'ip'=>$s['public_net']['ipv4']['ip']??null,'snapshot'=>$latest?['id'=>$latest['id'],'created'=>$latest['created']]:null,'snapshots'=>count($images),'error'=>null];
+                $cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>$s['status']??'saved','type'=>$s['server_type']['name']??$cfg['type'],'location'=>$cfg['location'],'ip'=>$s['public_net']['ipv4']['ip']??null,'save_snapshot'=>($s['labels']['enoch-save']??'yes')!=='no','snapshot'=>$latest?['id'=>$latest['id'],'created'=>$latest['created'],'size'=>$latest['image_size']??null,'disk'=>$latest['disk_size']]:null,'initial_image'=>$cfg['initial_image'],'snapshots'=>count($images)+((!in_array($cfg['initial_image'],array_column($images,'id'),true))?1:0),'error'=>null];
             }catch(\Throwable $e){$cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>'unknown','error'=>$e->getMessage()];}
         }
         $result=['checked'=>time(),'services'=>$cards];$this->store->set('dashboard',$result);return $result;

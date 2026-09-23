@@ -39,6 +39,11 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   assert post('job',{'service':'nextcloud','operation':'stop'},'wrong')[0]==400
   assert post('user',{'name':'testviewer','password':'a-viewer-test-password','role':'viewer'},token)[0]==200
   assert post('job',{'service':'unknown','operation':'stop'},token)[0]==400
+  assert post('cron-command',{},token)[0]==200
+  assert post('save-credentials',{'service':'hpb','values':{'wolke_secret':'hidden-test-signaling'}},token)[0]==200
+  assert b'hidden-test-signaling' in post('credentials',{'service':'hpb'},token)[1]
+  assert b'hidden-test-signaling' not in request('/api.php')[1]
+  assert request('/',headers={'Accept-Language':'de-DE,de;q=0.9,en;q=0.8'})[1].find('Das Anvertraute pflegen.'.encode())>=0
   assert request('/cron.php')[0]==401
   assert request('/cron.php',b'',{'Authorization':'Bearer wrong'})[0]==401
   started=time.monotonic();status,body,_=request('/cron.php',b'',{'Authorization':'Bearer '+'b'*64});elapsed=time.monotonic()-started
@@ -53,8 +58,15 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   status,body,_=request('/');token=re.search(rb'name="csrf" value="([^"]+)"',body).group(1).decode()
   status,body,_=request('/',urllib.parse.urlencode(dict(csrf=token,name='testviewer',password='a-viewer-test-password')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
   token=re.search(rb'name="csrf-token" content="([^"]+)"',body).group(1).decode()
-  assert post('job',{'service':'nextcloud','operation':'stop'},token)[0]==400
-  assert post('user',{'name':'intruder','password':'a-long-test-password','role':'admin'},token)[0]==400
+  assert post('job',{'service':'nextcloud','operation':'stop'},token)[0]==403
+  assert post('user',{'name':'intruder','password':'a-long-test-password','role':'admin'},token)[0]==403
+  assert post('cron-command',{},token)[0]==403
+  assert post('credentials',{'service':'hpb'},token)[0]==403
+  assert request('/api.php?action=options&service=hpb')[0]==403
+  status,body,_=request('/api.php');data=json.loads(body)
+  assert data['services']==[] and data['users']==[] and data['tasks']==[] and data['audit']==[]
+  assert 'cron_seen' not in data
+  assert 'hidden-test-signaling' not in body.decode()
   print('HTTP integration passed: setup, login, CSRF, roles, session logout, secret exclusion and cron authentication.')
   print(f'Cron acknowledged in {elapsed:.3f}s while downstream work took 3s.')
  finally:server.terminate();server.wait();slow.shutdown()

@@ -37,3 +37,18 @@
 
 
 - Automatic provider cron calls had not yet arrived at the time of initial verification. The manual tick is distinguished from an observed recurring schedule. The user was asked to check the complete authenticated POST command.
+
+## Access, display and lifecycle update (2026-09-23)
+
+- 39 PHP checks cover isolated lifecycle failures, identity checks, retention,
+  encrypted credentials and scoped permissions. HTTP tests cover legacy setup,
+  login, CSRF, German negotiation, forbidden credentials/options and simple DTOs.
+- The cron response is flushed before work; isolated HTTP acknowledgement was
+  0.001 seconds while a simulated downstream controller took three seconds.
+- Browser inspection covers English/German, system dark mode, explicit light mode,
+  simple/technical screens, member permissions and large-disk/discard warnings.
+- HPB readiness uses `/api/v1/welcome`; the former `/spreed/api/v1/welcome`
+  returned 404 even while the backend itself was healthy.
+- The original Nextcloud image 434940917 is `nextcloud-wolke2-initial`, protected
+  against deletion and labelled `lifecycle=base`. HPB's protected initial image
+  remains 430318286. Snapshot contents are never modified by renaming/protection.

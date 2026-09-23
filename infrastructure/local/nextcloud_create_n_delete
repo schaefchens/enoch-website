@@ -243,7 +243,7 @@ def stop(args):
         return
     if server["status"] == "running":
         log("Cleanly stopping Nextcloud, PostgreSQL and the other AIO containers...")
-        ssh("/usr/local/sbin/nextcloud-aio-stop-siblings")
+        ssh("bash", "-c", "if test -x /usr/local/sbin/enoch-prepare-snapshot; then /usr/local/sbin/enoch-prepare-snapshot; else /usr/local/sbin/nextcloud-aio-stop-siblings; fi")
         # Verify separately; no hard poweroff fallback is used.
         ssh("bash", "-c", "test -z \"$(docker ps --format '{{.Names}}' | grep '^nextcloud-aio-' | grep -Ev '^nextcloud-aio-(mastercontainer|domaincheck)$')\"")
         mutate("server", "shutdown", ident)
@@ -285,7 +285,7 @@ def stop(args):
     if new_snapshot:
         # Never touch base snapshots, HPB snapshots, or another instance's images.
         for old in snapshots(SELECTOR)[args.retain:]:
-            if old["id"] != new_snapshot["id"]:
+            if old["id"] != new_snapshot["id"] and not old.get("protection", {}).get("delete") and "-initial" not in old.get("description", ""):
                 mutate("image", "delete", old["id"])
 
 
@@ -299,7 +299,7 @@ def main(argv=None):
     source.add_argument("--fresh", action="store_true", help="Create Ubuntu 24.04 for the initial installation")
     parser.add_argument("-S", "--skip-snapshot", action="store_true", help="Discard changes; requires an available restore snapshot")
     parser.add_argument("--keep-server", action="store_true", help="Snapshot and power off, retaining the VM capacity")
-    parser.add_argument("--retain", type=int, default=2, help="Managed Nextcloud snapshots to retain (default: 2)")
+    parser.add_argument("--retain", type=int, default=1, help="Current snapshots to retain, in addition to the protected initial (default: 1)")
     parser.add_argument("--dry-run", action="store_true", help="Read and validate cloud state without changes")
     args = parser.parse_args(argv)
     if args.retain < 1:

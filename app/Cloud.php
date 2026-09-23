@@ -11,6 +11,9 @@ class Cloud {
         if($body!==null)curl_setopt($ch,CURLOPT_POSTFIELDS,json_encode($body,JSON_THROW_ON_ERROR));
         $raw=curl_exec($ch); $status=curl_getinfo($ch,CURLINFO_RESPONSE_CODE);
         if($raw===false)throw new \RuntimeException('Hetzner request timed out or failed. The result must be checked before retrying.');
+        // Successful DELETE requests commonly return 204 with an empty body.
+        // That is a completed mutation, not malformed JSON.
+        if($status===204&&$raw==='')return [];
         $data=json_decode($raw,true);
         if($status===404&&$method==='GET')return ['not_found'=>true];
         if($status<200||$status>=300){
@@ -58,6 +61,7 @@ class Cloud {
     }
     public function imageValid(array $image,array $cfg,?int $serverId=null): void {
         if(($image['status']??'')!=='available'||($image['type']??'')!=='snapshot')throw new \RuntimeException('Snapshot is not available. The server has been retained.');
+        if($serverId===null&&($image['id']??null)===($cfg['initial_image']??-1))return;
         foreach($cfg['labels'] as $k=>$v)if(($image['labels'][$k]??null)!==$v)throw new \RuntimeException('Snapshot ownership does not match.');
         if($serverId!==null&&($image['created_from']['id']??null)!==$serverId)throw new \RuntimeException('Snapshot was not created from this server.');
     }

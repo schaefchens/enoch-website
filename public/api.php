@@ -11,12 +11,38 @@ try{
         $input=json_decode(file_get_contents('php://input'),true,32,JSON_THROW_ON_ERROR);
         $auth->csrf($_SERVER['HTTP_X_CSRF_TOKEN']??'');
         if($action==='job'){
-            $auth->requireRole('operator');$id=$engine->enqueue((string)($input['service']??''),(string)($input['operation']??''),$user['name']);Web::json(['id'=>$id],202);
+            $service=(string)($input['service']??'');$operation=(string)($input['operation']??'');
+            $auth->access->requireOperation($user,$service,$operation);
+            $options=$input['options']??[];
+            if(!is_array($options))throw new RuntimeException('Invalid lifecycle options.');
+            if(array_diff(array_keys($options),['acknowledge_discard','acknowledge_large_disk']))$auth->access->requireOperation($user,$service,'advanced');
+            $id=$engine->enqueue($service,$operation,$user['name'],$options);Web::json(['id'=>$id],202);
         }
-        if($action==='tick'){session_write_close();Web::json($engine->tick());}
+        if(in_array($action,['credentials','save-credentials'],true)){
+            $service=(string)($input['service']??'');$auth->access->requireOperation($user,$service,'credentials');
+            $vault=new Enoch\Vault($config,$store);
+            if($action==='save-credentials'){$auth->requireRole('admin');$vault->save($service,$input['values']??[]);$store->audit($user['name'],'Updated stored credentials',$service);Web::json(['ok'=>true]);}
+            $store->audit($user['name'],'Viewed stored credentials',$service);
+            Web::json(['fields'=>$config->services[$service]['credential_fields']??[],'values'=>$vault->read($service)]);
+        }
+        if($action==='cron-command'){
+            $auth->requireRole('admin');$key=$config->get('CRON_KEY');
+            if(strlen($key)<32)throw new RuntimeException('Cron key is missing.');
+            $quote=static fn(string $s)=>"'".str_replace("'","'\\''",$s)."'";
+            $command='/usr/bin/curl --silent --show-error --connect-timeout 2 --max-time 5 --request POST --header '.$quote('Authorization: Bearer '.$key).' '.$quote(rtrim($config->get('APP_URL'),'/').'/cron.php');
+            $store->audit($user['name'],'Viewed scheduler command','');Web::json(['command'=>$command]);
+        }
+        if($action==='tick'){session_write_close();$engine->tick();Web::json(['ok'=>true]);}
         if($action==='pause'){$auth->requireRole('admin');$engine->abandon((string)($input['id']??''),$user['name']);Web::json(['ok'=>true]);}
         if($action==='user'){
-            $auth->requireRole('admin');$auth->addUser((string)($input['name']??''),(string)($input['password']??''),(string)($input['role']??''));$store->audit($user['name'],'Created account',(string)$input['name']);Web::json(['ok'=>true]);
+            $auth->requireRole('admin');$auth->addUser((string)($input['name']??''),(string)($input['password']??''),(string)($input['role']??''),(string)($input['ui_mode']??'simple'),$input['permissions']??[]);$store->audit($user['name'],'Created account',(string)$input['name']);Web::json(['ok'=>true]);
+        }
+        if($action==='access'){
+            $auth->requireRole('admin');$id=(int)($input['id']??0);
+            $auth->access->updateUser($id,(string)($input['role']??''),(string)($input['ui_mode']??''),$input['permissions']??[]);
+            $store->audit($user['name'],'Updated account access',(string)$id);
+            if($id===$user['id'])$_SESSION['version']++;
+            Web::json(['ok'=>true]);
         }
         if($action==='disable-user'){
             $auth->requireRole('admin');$id=(int)($input['id']??0);
@@ -37,9 +63,11 @@ try{
     }
     if($_SERVER['REQUEST_METHOD']!=='GET')Web::json(['error'=>'Method not allowed.'],405);
     session_write_close();
+    if($action==='options'){$service=(string)($_GET['service']??'');$auth->access->requireOperation($user,$service,'advanced');Web::json((new Enoch\Lifecycle($cloud))->options($config->services[$service]));}
     if($action!=='status')Web::json(['error'=>'Unknown action.'],404);
-    $dashboard=$engine->dashboard();
-    $jobs=$store->query('SELECT id,service,operation,status,phase,created,updated,actor,message FROM jobs ORDER BY created DESC LIMIT 30')->fetchAll();
-    $tasks=[];foreach($config->tasks as $id=>$t)$tasks[]=['id'=>$id,'title'=>$t['title'],'description'=>$t['description'],'interval'=>max(60,(int)$config->get($t['interval_env'],(string)$t['interval'])),'state'=>$store->get('task:'.$id),'configured'=>$config->get($t['key_env'])!==''];
-    Web::json($dashboard+['jobs'=>$jobs,'tasks'=>$tasks,'cron_seen'=>$store->get('cron_seen'),'worker_seen'=>$store->get('worker_seen'),'audit'=>$store->query('SELECT time,actor,event,detail FROM audit ORDER BY id DESC LIMIT 60')->fetchAll(),'users'=>$user['role']==='admin'?$store->query('SELECT id,name,role,active FROM users ORDER BY name')->fetchAll():[]]);
-}catch(Throwable $e){Web::json(['error'=>$e instanceof PDOException?'The private database is busy or unavailable. Try again.':$e->getMessage()],400);}
+    Web::json((new Enoch\Dashboard($config,$store,$auth->access))->present($user,$engine->dashboard()));
+}catch(Throwable $e){
+    $message=$e instanceof PDOException?'The account database is busy. Please try again.':$e->getMessage();
+    if(($user['ui_mode']??'technical')==='simple'&&$action==='tick')$message='We could not check progress. Please try again shortly.';
+    Web::json(['error'=>$message],$e instanceof Enoch\PermissionDenied?403:400);
+}

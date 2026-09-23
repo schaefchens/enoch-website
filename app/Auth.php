@@ -3,7 +3,8 @@ declare(strict_types=1);
 namespace Enoch;
 
 final class Auth {
-    public function __construct(private Config $config,private Store $store) {}
+    public readonly Access $access;
+    public function __construct(private Config $config,private Store $store) {$this->access=new Access($config,$store);}
     public function session():void {
         if(session_status()===PHP_SESSION_ACTIVE)return;
         $local=$this->config->get('APP_ENV')==='local';
@@ -17,13 +18,13 @@ final class Auth {
     }
     public function user():?array {
         if(empty($_SESSION['uid'])||time()-($_SESSION['seen']??0)>3600)return null;
-        $u=$this->store->query('SELECT id,name,role,active,version FROM users WHERE id=?',[$_SESSION['uid']])->fetch();
+        $u=$this->store->query('SELECT id,name,role,ui_mode,active,version FROM users WHERE id=?',[$_SESSION['uid']])->fetch();
         if(!$u||!$u['active']||$u['version']!==($_SESSION['version']??null))return null;
         $_SESSION['seen']=time();return $u;
     }
     public function requireRole(string $role='viewer'):array {
         $u=$this->user();$ranks=['viewer'=>0,'operator'=>1,'admin'=>2];
-        if(!$u||($ranks[$u['role']]??-1)<$ranks[$role])throw new \RuntimeException('You do not have permission for this action.');return $u;
+        if(!$u||($ranks[$u['role']]??-1)<$ranks[$role])throw new PermissionDenied('You do not have permission for this action.');return $u;
     }
     public function login(string $name,string $password):bool {
         $name=mb_strtolower(trim($name));$ip=$_SERVER['REMOTE_ADDR']??'local';$now=time();
@@ -35,13 +36,18 @@ final class Auth {
         session_regenerate_id(true);$_SESSION=['uid'=>$u['id'],'version'=>$u['version'],'seen'=>$now,'csrf'=>bin2hex(random_bytes(32))];
         $this->store->audit($u['name'],'Signed in','');return true;
     }
-    public function addUser(string $name,string $password,string $role):void {
+    public function addUser(string $name,string $password,string $role,string $mode='simple',array $permissions=[]):int {
         $name=mb_strtolower(trim($name));
         if(!preg_match('/^[a-z0-9][a-z0-9._@-]{2,79}$/',$name))throw new \RuntimeException('Use a username of 3–80 letters, numbers, dots, dashes or @.');
         if(strlen($password)<12||strlen($password)>72)throw new \RuntimeException('Use a password of 12–72 bytes.');
-        if(!in_array($role,['admin','operator','viewer'],true))throw new \RuntimeException('Unknown role.');
+        [$mode,$rights]=$this->access->normalize($role,$mode,$permissions);
         $hash=password_hash($password,defined('PASSWORD_ARGON2ID')?PASSWORD_ARGON2ID:PASSWORD_DEFAULT);
-        try{$this->store->query('INSERT INTO users(name,password,role,created) VALUES(?,?,?,?)',[$name,$hash,$role,time()]);}catch(\PDOException){throw new \RuntimeException('That username already exists.');}
+        $this->store->db->exec('SAVEPOINT add_account');
+        try{
+            $this->store->query('INSERT INTO users(name,password,role,ui_mode,created) VALUES(?,?,?,?,?)',[$name,$hash,$role,$mode,time()]);
+            $id=(int)$this->store->db->lastInsertId();$this->access->replaceGrants($id,$rights);
+            $this->store->db->exec('RELEASE add_account');return $id;
+        }catch(\Throwable $e){$this->store->db->exec('ROLLBACK TO add_account');$this->store->db->exec('RELEASE add_account');if($e instanceof \PDOException&&str_contains($e->getMessage(),'UNIQUE'))throw new \RuntimeException('That username already exists.');throw $e;}
     }
     public function setup(string $key,string $name,string $password):void {
         $expected=$this->config->get('SETUP_KEY');

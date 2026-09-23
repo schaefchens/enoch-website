@@ -98,3 +98,53 @@ Unit tests use a fake cloud to exercise failed preparation, IP identity, snapsho
 - [Hetzner Cloud API](https://docs.hetzner.cloud/reference/cloud)
 - [phpseclib](https://phpseclib.com/)
 - [Nextcloud AIO](https://github.com/nextcloud/all-in-one)
+
+## People, display and credentials
+
+Administrators select **Simple** or **Technical** per account. Assign viewing,
+starting, stopping, advanced lifecycle options and credential access independently
+for each service. New accounts have no assigned services; new services are not
+implicitly assigned to existing members. Existing accounts retain their original
+service rights during the one-time migration, but gain no credential/advanced
+rights. Administrators always have full access. Permission edits invalidate the
+member's existing session. Already queued work can still finish.
+
+German and English default from `Accept-Language`; language and appearance can be
+changed on both the login page and inside the portal. Appearance follows the OS
+unless explicitly selected. Catalogs are in `config/locales`; translations use
+English keys with English fallback. To add a language, add its catalog and register
+it in `I18n.php`, the preference selector and `preferences.js`.
+
+Credential values are served only after an authenticated, CSRF-checked request and
+an explicit per-service credential grant. They are absent from the dashboard JSON,
+audit entries and HTML. The audit records who viewed them. Values are encrypted
+with AES-256-GCM in SQLite; `var/credentials.key` is required to restore them and
+must be backed up privately alongside the database. The credential dialog clears
+on close, backgrounding the page or after two minutes. Copying puts the value into
+the user's clipboard. Administrators can update the stored reference details; this
+does not change passwords on the target service. The Nextcloud password imported
+from AIO is its **initial installer password**, which may differ if subsequently
+changed in Nextcloud.
+
+## Snapshot profiles and retention
+
+Each configured service pins an `initial_image`. It must be available, have
+`-initial` in its description, and have Hetzner deletion protection enabled. Keep
+that image unchanged. Normal saved stops create and verify a new current image,
+release the VM, then delete older unprotected managed images one per worker tick.
+For a short time while a new image is being made there can be three snapshots.
+If cleanup fails, extra snapshots remain rather than risking the restore points.
+
+Advanced operators choose initial/current, the server type and whether this
+session is saved when it stops. A larger disk snapshot requires a larger future
+VM even if its compressed image is small. Explicit confirmation is required to
+replace the current image with such an image. For a temporary large HPB instance,
+turn off snapshot saving; the previous current image remains compatible with the
+smaller VM. Discarding changes is clearly confirmed again at shutdown, including
+in the simple interface. Other services are never implicitly started or stopped.
+
+The Nextcloud agent stops AIO, clears the contents of active swap files (with a
+free-memory check and preserved swap UUID/capacity), and trims free blocks before
+VM shutdown. It does not delete Docker images or user files. An already-off VM
+cannot be trimmed retroactively. Snapshot storage size depends on compressed disk
+contents; it is separate from the disk size required to restore the image.

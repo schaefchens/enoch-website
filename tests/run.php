@@ -7,7 +7,7 @@ function check(bool $value,string $label):void{global $checks;if(!$value)throw n
 function refuses(callable $fn):bool{try{$fn();return false;}catch(Throwable){return true;}}
 final class FakeCloud extends Cloud {
     public array $servers=[],$images=[],$calls=[];
-    public bool $unsafeIP=false,$loseSnapshotResponse=false,$loseCreateResponse=false,$rejectSnapshot=false;
+    public bool $missingInitial=false,$unsafeIP=false,$loseSnapshotResponse=false,$loseCreateResponse=false,$rejectSnapshot=false;
     public function __construct(public array $cfg){parent::__construct('fake');}
     public function seed(string $state='running'):array {
         $s=['id'=>10,'name'=>$this->cfg['name'],'status'=>$state,'labels'=>[], 'public_net'=>['ipv4'=>['id'=>$this->cfg['ipv4'],'ip'=>'192.0.2.1'],'ipv6'=>['id'=>$this->cfg['ipv6']]],'server_type'=>['name'=>$this->cfg['type']]];
@@ -25,8 +25,8 @@ final class FakeCloud extends Cloud {
                 if(isset($q['label_selector']))foreach(explode(',',$q['label_selector']) as $pair){[$k,$v]=explode('=',$pair,2);$images=array_values(array_filter($images,fn($i)=>($i['labels'][$k]??null)===$v));}
                 return ['images'=>$images];
             }
-            if(str_starts_with($base,'/images/')){foreach($this->images as $i)if($i['id']===(int)basename($base))return ['image'=>$i];return ['not_found'=>true];}
-            if($base==='/server_types')return ['server_types'=>[['architecture'=>'x86','disk'=>40]]];
+            if(str_starts_with($base,'/images/')){if((int)basename($base)===$this->cfg['initial_image']&&!$this->missingInitial){$i=$this->image();$i['id']=$this->cfg['initial_image'];$i['description']='test-initial';$i['protection']=['delete'=>true];return ['image'=>$i];}foreach($this->images as $i)if($i['id']===(int)basename($base))return ['image'=>$i];return ['not_found'=>true];}
+            if($base==='/server_types')return ['server_types'=>[['name'=>$q['name']??$this->cfg['type'],'architecture'=>'x86','disk'=>($q['name']??'')==='cx53'?320:40]]];
             if(str_starts_with($base,'/firewalls/'))return ['firewall'=>['id'=>1]];
         }
         if($method==='POST'&&$path==='/servers'){
@@ -38,14 +38,18 @@ final class FakeCloud extends Cloud {
         if(str_ends_with($path,'/shutdown')){$this->servers[0]['status']='off';return ['action'=>['id'=>2]];}
         if(str_ends_with($path,'/create_image')){
             if($this->rejectSnapshot)throw new RuntimeException('Snapshot failed');
-            $i=$this->image($body['labels']);$i['labels']=$body['labels'];$this->images[]=$i;
+            $i=$this->image($body['labels']);$i['labels']=$body['labels'];$i['created']=gmdate('c');$i['id']=21;$this->images[]=$i;
             if($this->loseSnapshotResponse)throw new RuntimeException('Lost snapshot response');
             return ['image'=>$i];
         }
+        if($method==='DELETE'&&str_starts_with($path,'/images/')){$this->images=array_values(array_filter($this->images,fn($i)=>$i['id']!==(int)basename($path)));return [];}
         if($method==='DELETE'){$this->servers=[];return ['action'=>['id'=>4]];}
         throw new RuntimeException('Unexpected request '.$method.' '.$path);
     }
 }
+
+// Hetzner's successful image DELETE is a 204 with no JSON body. FakeCloud
+// returns the equivalent empty array in pruning tests above.
 final class FakeHost extends Host {
     public string $state='ready';public array $commands=[];public bool $healthy=true;
     public function command(array $s,string $command):array{$this->commands[]=$command;return ['state'=>$command==='probe'?'installed':$this->state];}
@@ -77,7 +81,7 @@ try{
     check($j['status']==='failed'&&!$c->calls,'matching name with wrong IP cannot authorize changes');
     [$s,$c,$h,$e]=fixture();$c->seed('off');$c->rejectSnapshot=true;$e->enqueue('nextcloud','stop','alice');tick($s,$c,$h);tick($s,$c,$h);$s->query('UPDATE jobs SET phase_since=?',[time()-121]);$j=tick($s,$c,$h);
     check($j['status']==='failed'&&!deleted($c),'failed snapshot retains the VM');
-    [$s,$c,$h,$e]=fixture();$c->seed('off');$c->loseSnapshotResponse=true;$e->enqueue('nextcloud','stop','alice');for($n=0;$n<8;$n++)$j=tick($s,$c,$h);
+    [$s,$c,$h,$e]=fixture();$c->seed('off');$c->loseSnapshotResponse=true;$e->enqueue('nextcloud','stop','alice');for($n=0;$n<12;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&count($c->images)===1,'lost snapshot response reconciles without duplicate writes');
     [$s,$c,$h,$e]=fixture();$c->seed('off');$e->enqueue('nextcloud','stop','alice');tick($s,$c,$h);tick($s,$c,$h);$c->images[0]['created_from']['id']=99;tick($s,$c,$h);
     check(!deleted($c),'snapshot from another VM never permits deletion');
@@ -88,7 +92,7 @@ try{
     [$s,$c,$h,$e]=fixture();$c->seed();$e->enqueue('nextcloud','stop','alice');
     check(refuses(fn()=>$e->enqueue('nextcloud','start','bob')),'only one active job per service');
     check(refuses(fn()=>$e->enqueue('arbitrary','stop','bob')),'browser cannot select unmanaged resources');
-    [$s,$c,$h,$e]=fixture();$e->enqueue('nextcloud','start','alice');$j=tick($s,$c,$h);
+    [$s,$c,$h,$e]=fixture();$c->missingInitial=true;$e->enqueue('nextcloud','start','alice');$j=tick($s,$c,$h);
     check($j['status']==='failed'&&!$c->calls,'restore without snapshot fails closed');
     [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$c->loseCreateResponse=true;$e->enqueue('nextcloud','start','alice');for($n=0;$n<5;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&count($c->calls)===1,'lost create response reconciles using job label and pinned IPs');
@@ -108,7 +112,31 @@ try{
     $scheduler->runDue();$scheduler->runDue();check($calls===1,'rapid cron ticks run a scheduled task only when due');
     check(!str_contains(json_encode($s->query('SELECT * FROM audit')->fetchAll()),'test-secret-never-log'),'scheduled task secret is absent from audit log');
     $s->set('task:spirit-idle',['attempted'=>0]);$scheduler=new Scheduler($config,$s,fn($url)=>[403,['status'=>'error']]);$r=$scheduler->runDue();check($r['status']==='failed','scheduler records downstream authentication failure');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];$e->enqueue('nextcloud','stop','alice');for($n=0;$n<15;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&array_column($c->images,'id')===[21],'verified new snapshot replaces previous current snapshot');
+    check(!array_filter($c->calls,fn($a)=>$a[0]==='DELETE'&&$a[1]==='/images/'.$c->cfg['initial_image']),'protected initial is never pruned');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];
+    check(refuses(fn()=>$e->enqueue('nextcloud','stop','alice',['save_snapshot'=>false])),'discard requires explicit acknowledgement');
+    $e->enqueue('nextcloud','stop','alice',['save_snapshot'=>false,'acknowledge_discard'=>true]);for($n=0;$n<12;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&array_column($c->images,'id')===[20]&&!array_filter($c->calls,fn($a)=>str_ends_with($a[1],'create_image')),'discard stop keeps previous current snapshot and creates none');
+    [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$e->enqueue('nextcloud','start','alice',['type'=>'cx53']);$j=tick($s,$c,$h);
+    check($j['status']==='failed'&&!$c->calls,'large-disk saving requires acknowledgement');
+    [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$e->enqueue('nextcloud','start','alice',['type'=>'cx53','save_snapshot'=>false,'acknowledge_discard'=>true]);for($n=0;$n<5;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&$c->calls[0][2]['labels']['enoch-save']==='no','ephemeral large server stores no-save policy on VM identity');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->servers[0]['labels']['enoch-save']='no';$e->enqueue('nextcloud','stop','alice');$j=tick($s,$c,$h);
+    check($j['status']==='failed'&&!$c->calls,'ordinary stop cannot silently discard ephemeral session');
+    [$s,$c,$h,$e]=fixture();$auth=new Auth($config,$s);$id=$auth->addUser('limited','a-test-password-long','operator','simple',['nextcloud'=>['view'=>true,'start'=>true]]);$u=$s->query('SELECT * FROM users WHERE id=?',[$id])->fetch();
+    check(isset($auth->access->grants($u)['nextcloud'])&&!isset($auth->access->grants($u)['hpb']),'per-service grants do not expose unassigned services');
+    check(refuses(fn()=>$auth->access->requireOperation($u,'nextcloud','stop'))&&refuses(fn()=>$auth->access->requireOperation($u,'nextcloud','credentials')),'start-only account cannot stop or reveal credentials');
+    $present=(new Enoch\Dashboard($config,$s,$auth->access))->present($u,['checked'=>time(),'services'=>[['id'=>'nextcloud','state'=>'running','ip'=>'sensitive-ip','error'=>'private-error'],['id'=>'hpb','state'=>'running']]]);
+    check(count($present['services'])===1&&$present['services'][0]['allocated']&&!str_contains(json_encode($present),'sensitive-ip')&&!str_contains(json_encode($present),'private-error'),'simple API uses a minimal whitelist and preserves allocation state');
+    $saved=(new Enoch\Dashboard($config,$s,$auth->access))->present($u,['checked'=>time(),'services'=>[['id'=>'nextcloud','state'=>'saved']]]);
+    check(!$saved['services'][0]['allocated'],'saved simple service cannot expose an inapplicable stop control');
+    $vault=new Enoch\Vault($config,$s);$vault->save('nextcloud',['admin_password'=>'private-test-value']);
+    check($vault->read('nextcloud')['admin_password']==='private-test-value'&&!str_contains(json_encode($s->get('credentials:nextcloud')),'private-test-value'),'credentials are encrypted at rest and decrypt correctly');
+    check(refuses(fn()=>$vault->save('nextcloud',['unknown'=>'value'])),'credential field allowlist enforced');
+    $s->migrateAccess(array_keys($config->services));check(count($auth->access->grants($u))===1,'migration reruns do not expand grants');
     echo "\n$checks checks passed. No real cloud mutations were made.\n";
 }finally{
-    foreach($dirs as $dir){foreach(glob($dir.'/*') as $f)unlink($f);rmdir($dir);}unlink($private.'/ssh/enoch.pub');rmdir($private.'/ssh');rmdir($private);
+    foreach($dirs as $dir){foreach(glob($dir.'/*') as $f)unlink($f);rmdir($dir);}if(is_file($private.'/credentials.key'))unlink($private.'/credentials.key');unlink($private.'/ssh/enoch.pub');rmdir($private.'/ssh');rmdir($private);
 }
