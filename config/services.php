@@ -7,7 +7,7 @@ return [
     'nextcloud' => [
         'title' => 'Nextcloud', 'subtitle' => 'Files, Office & Talk', 'domain' => 'wolke2.schaefchens.de',
         'description' => 'Your shared workspace, with local Collabora and a choice of internal or external Talk.',
-        'simple_title' => 'Files & documents',
+        'simple_title' => 'Nextcloud · Files & documents',
         'simple_description' => 'Our shared place for files, documents and working together.',
         'simple_open_label' => 'Open our files',
         'initial_image' => 434940917,
@@ -20,7 +20,7 @@ return [
     'hpb' => [
         'title' => 'Talk backend', 'subtitle' => 'Shared signaling & calls', 'domain' => 'hpb.schaefchens.de',
         'description' => 'Shared by wolke and wolke2. Start and stop it independently of Nextcloud.',
-        'simple_title' => 'Group call support',
+        'simple_title' => 'Nextcloud Talk · High Performance Backend',
         'simple_description' => 'Helps our group calls work. Files & documents also needs to be on to use Talk here.',
         'simple_url' => 'https://wolke2.schaefchens.de/apps/spreed/',
         'simple_open_label' => 'Open Talk',
