@@ -20,7 +20,10 @@ if(function_exists('fastcgi_finish_request'))fastcgi_finish_request();else flush
 // One short unit of work only. Persisted states are continued by the next tick.
 // The supplied caller has --max-time 5 as an independent hard bound.
 try{
-    $scheduler=new Enoch\Scheduler($config,$store);
-    $result=$scheduler->runDue();
-    if(isset($result['due'])&&$result['due']===false)$engine->tick();
+    if($store->query("SELECT 1 FROM jobs WHERE status='active' LIMIT 1")->fetchColumn())$engine->tick();
+    else{
+        $activity=new Enoch\ActivityMonitor($config,$store,$cloud,$engine);
+        $result=$config->get('HETZNER_CLOUD_TOKEN')!==''?$activity->runDue():['due'=>false];
+        if(isset($result['due'])&&$result['due']===false)(new Enoch\Scheduler($config,$store))->runDue();
+    }
 }catch(Throwable $e){$store->audit('scheduler','Tick failed','Inspect scheduler configuration and service activity.');}

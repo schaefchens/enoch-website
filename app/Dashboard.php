@@ -11,7 +11,11 @@ final class Dashboard {
         $services=[];
         foreach($dashboard['services'] as $service){
             $id=$service['id'];if(!isset($grants[$id]))continue;
-            if($technical){$service['permissions']=$grants[$id];$services[]=$service;continue;}
+            if($technical){
+                $heartbeat=$this->store->get('activity:'.$id,[]);$service['permissions']=$grants[$id];
+                $service['activity_last_seen']=$heartbeat['last_seen']??null;$service['idle_timeout']=(int)($this->config->services[$id]['idle_timeout']??0);
+                $services[]=$service;continue;
+            }
             $cfg=$this->config->services[$id];
             $services[]=[
                 'id'=>$id,'title'=>$cfg['simple_title']??$cfg['title'],
@@ -29,7 +33,7 @@ final class Dashboard {
             $placeholders=implode(',',array_fill(0,count($grants),'?'));
             $jobs=$this->store->query("SELECT id,service,operation,status,phase,created,updated,actor,message,data FROM jobs WHERE service IN ($placeholders) ORDER BY (status='active') DESC,created DESC LIMIT 100",array_keys($grants))->fetchAll();
         }
-        foreach($jobs as &$job){$data=json_decode($job['data'],true);$job['save_snapshot']=$data['save_snapshot']??true;unset($job['data']);}unset($job);
+        foreach($jobs as &$job){$data=json_decode($job['data'],true);$job['save_snapshot']=$data['save_snapshot']??true;$job['checkpoint_name']=$data['checkpoint_name']??$data['options']['checkpoint_name']??null;unset($job['data']);}unset($job);
         if(!$technical)$jobs=array_map(fn($job)=>[
             'service'=>$job['service'],'operation'=>$job['operation'],'status'=>$job['status'],
             'created'=>$job['created'],'save_snapshot'=>$job['save_snapshot'],'message'=>self::simpleMessage($job),
@@ -52,6 +56,7 @@ final class Dashboard {
                 'interval'=>max(60,(int)$this->config->get($task['interval_env'],(string)$task['interval'])),
                 'state'=>$this->store->get('task:'.$id),'configured'=>$this->config->get($task['key_env'])!=='',
             ];
+            foreach((new ScheduledJobs($this->config,$this->store))->all() as $task)$result['tasks'][]=$task+['managed'=>true,'title'=>$task['name'],'description'=>$task['method'].' · '.$task['url'],'interval'=>$task['interval_seconds'],'configured'=>$task['has_bearer']];
             $result['users']=$this->access->users();
             foreach($this->config->services as $id=>$cfg)$result['service_catalog'][]=['id'=>$id,'title'=>$cfg['title']];
         }

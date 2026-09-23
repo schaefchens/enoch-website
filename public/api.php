@@ -32,6 +32,14 @@ try{
             $command='/usr/bin/curl --silent --show-error --connect-timeout 2 --max-time 5 --request POST --header '.$quote('Authorization: Bearer '.$key).' '.$quote(rtrim($config->get('APP_URL'),'/').'/cron.php');
             $store->audit($user['name'],'Viewed scheduler command','');Web::json(['command'=>$command]);
         }
+        if($action==='scheduled-job'){
+            $auth->requireRole('admin');$jobs=new Enoch\ScheduledJobs($config,$store);$id=$jobs->save($input);
+            $store->audit($user['name'],'Saved scheduled request',(string)$id);Web::json(['ok'=>true,'id'=>$id]);
+        }
+        if($action==='delete-scheduled-job'){
+            $auth->requireRole('admin');$id=(int)($input['id']??0);(new Enoch\ScheduledJobs($config,$store))->delete($id);
+            $store->audit($user['name'],'Deleted scheduled request',(string)$id);Web::json(['ok'=>true]);
+        }
         if($action==='tick'){session_write_close();$engine->tick();Web::json(['ok'=>true]);}
         if($action==='pause'){$auth->requireRole('admin');$engine->abandon((string)($input['id']??''),$user['name']);Web::json(['ok'=>true]);}
         if($action==='user'){

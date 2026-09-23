@@ -1,6 +1,6 @@
 """HTTP integration tests using temporary accounts/config and no real cloud token."""
 from pathlib import Path
-import http.cookiejar, json, os, re, shutil, socket, subprocess, tempfile, threading, time, urllib.request, urllib.error
+import hashlib, hmac, http.cookiejar, json, os, re, shutil, socket, subprocess, tempfile, threading, time, urllib.request, urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 root=Path(__file__).resolve().parents[1]
 class SlowController(BaseHTTPRequestHandler):
@@ -43,6 +43,17 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   assert post('save-credentials',{'service':'hpb','values':{'wolke_secret':'hidden-test-signaling'}},token)[0]==200
   assert b'hidden-test-signaling' in post('credentials',{'service':'hpb'},token)[1]
   assert b'hidden-test-signaling' not in request('/api.php')[1]
+  status,body,_=post('scheduled-job',{'name':'Remote cleanup','url':'https://maintenance.example.org/run','method':'POST','interval_seconds':300,'enabled':True,'bearer':'hidden-managed-bearer'},token)
+  assert status==200
+  managed_id=json.loads(body)['id'];status,body,_=request('/api.php')
+  dashboard=json.loads(body);managed=[task for task in dashboard['tasks'] if task.get('managed')][0]
+  assert managed['name']=='Remote cleanup' and managed['has_bearer'] and 'hidden-managed-bearer' not in body.decode()
+  managed.update({'bearer':'','interval_seconds':600,'enabled':False})
+  assert post('scheduled-job',managed,token)[0]==200
+  heartbeat=hmac.new(b'b'*64,b'enoch-activity:nextcloud',hashlib.sha256).hexdigest()
+  assert request('/activity.php?service=nextcloud')[0]==405
+  assert request('/activity.php?service=nextcloud',b'',{'Authorization':'Bearer wrong'})[0]==401
+  assert request('/activity.php?service=nextcloud',b'',{'Authorization':'Bearer '+heartbeat})[0]==200
   assert request('/',headers={'Accept-Language':'de-DE,de;q=0.9,en;q=0.8'})[1].find('Das Anvertraute pflegen.'.encode())>=0
   assert request('/cron.php')[0]==401
   assert request('/cron.php',b'',{'Authorization':'Bearer wrong'})[0]==401
@@ -61,6 +72,7 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   assert post('job',{'service':'nextcloud','operation':'stop'},token)[0]==403
   assert post('user',{'name':'intruder','password':'a-long-test-password','role':'admin'},token)[0]==403
   assert post('cron-command',{},token)[0]==403
+  assert post('scheduled-job',{'name':'Intrusion'},token)[0]==403
   assert post('credentials',{'service':'hpb'},token)[0]==403
   assert request('/api.php?action=options&service=hpb')[0]==403
   status,body,_=request('/api.php');data=json.loads(body)

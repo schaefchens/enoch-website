@@ -52,3 +52,25 @@
 - The original Nextcloud image 434940917 is `nextcloud-wolke2-initial`, protected
   against deletion and labelled `lifecycle=base`. HPB's protected initial image
   remains 430318286. Snapshot contents are never modified by renaming/protection.
+
+## Checkpoints, activity and managed requests (2026-09-24)
+
+- 58 PHP checks cover protected checkpoint creation/restoration, deletion
+  protection before VM release, parent snapshot metadata, encrypted managed
+  bearer tokens, legacy credential ciphertext, authenticated activity heartbeats
+  and inactivity-triggered safe stop requests.
+- 22 Python infrastructure checks, all PHP/Bash/JavaScript syntax checks, locale
+  validation and `git diff --check` pass. The isolated HTTP integration test
+  verifies admin-only scheduled-request management, secret exclusion, heartbeat
+  authentication and a **0.001 second** cron acknowledgement while downstream
+  work continues for three seconds.
+- The update was deployed through the SFTP deployment workflow. Hosting still
+  reports PHP 8.5.10 with all required extensions. The public homepage and new
+  JavaScript asset return HTTP 200, `/activity.php` rejects GET with HTTP 405,
+  and private application source remains denied with HTTP 403. A manual
+  authenticated production cron POST returned HTTP 200 with `accepted=true` in
+  **0.104 seconds**.
+- Hetzner Cloud contains no VMs after deployment. Neither Nextcloud nor HPB was
+  started for this web-only release. Their activity agents will be installed by
+  cloud-init on the next Enoch restore; a live heartbeat and automatic stop can
+  only be observed after a service is next started and used.

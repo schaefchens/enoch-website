@@ -101,6 +101,8 @@ small { font-size: 14px; line-height: 1.6; color: var(--muted); }
 .task-state { min-width: 170px; margin-left: auto; text-align: right; }
 .task-state strong { font-size: 16px; }
 .task-state small { display: block; }
+.task-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:10px; }
+#scheduled-dialog { max-width:680px; }
 .text-button { min-height: 44px; padding: 7px 4px; border: 0; background: none; color: #345770; font-size: 16px; font-weight: 600; text-decoration: underline; text-underline-offset: 4px; }
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 table { width: 100%; border-collapse: collapse; font-size: 15px; text-align: left; }

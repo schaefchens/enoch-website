@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Send a heartbeat only when a real client recently used this server.
+set -Eeuo pipefail
+[[ $EUID == 0 ]] || exit 1
+[[ -r /etc/enoch/activity.env ]] || exit 0
+# shellcheck disable=SC1091
+source /etc/enoch/activity.env
+active=no
+case "${ENOCH_ACTIVITY_KIND:-}" in
+  nextcloud)
+    if docker logs --since 75s nextcloud-aio-apache 2>&1 \
+      | grep -E '"(GET|POST|PUT|DELETE|PROPFIND|REPORT|MOVE|COPY|PATCH) /' \
+      | grep -Ev ' /(status\.php|ocs/v2\.php/apps/serverinfo|index\.php/heartbeat)' \
+      | grep -q .; then active=yes; fi
+    # Keep long uploads, downloads, editing sessions and WebSockets alive even
+    # before Apache writes their completed request to its access log.
+    if [[ $active == no ]] && ss -Htn state established '( sport = :443 )' 2>/dev/null | grep -q .; then active=yes; fi
+    ;;
+  hpb)
+    # Talk keeps its signaling WebSocket open for a participant. TURN over TCP is
+    # also covered. Listening sockets are excluded by `state established`.
+    if ss -Htn state established '( sport = :443 or sport = :3478 )' 2>/dev/null | grep -q .; then active=yes; fi
+    ;;
+  *) exit 0;;
+esac
+[[ $active == yes ]] || exit 0
+curl --silent --show-error --fail --connect-timeout 2 --max-time 5 \
+  --request POST --header "Authorization: Bearer ${ENOCH_ACTIVITY_TOKEN}" \
+  "${ENOCH_ACTIVITY_URL}?service=${ENOCH_ACTIVITY_SERVICE}" >/dev/null

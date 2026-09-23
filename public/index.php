@@ -21,7 +21,7 @@ $user=$auth->user();
 $technical=$user&&($user['ui_mode']==='technical'||$user['role']==='admin');
 $admin=$user&&$user['role']==='admin';
 $e=Web::escape(...);
-$version='20260923-access-3';
+$version='20260924-activity-1';
 $i18n=new Enoch\I18n($config);$tr=$i18n->text(...);$t=static fn(string $text)=>Web::escape($tr($text));
 $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View only'];
 ?>
@@ -105,7 +105,7 @@ $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View o
                 <?php endif ?>
                 <div id="servers" class="server-grid"><div class="loading"><?=$t('Checking your services…')?></div></div>
                 <?php if($technical): ?>
-                    <?php if($admin): ?><div class="section-heading"><h2><?=$t('Scheduled maintenance')?></h2><span><?=$t('One cron, multiple tasks')?></span></div><div id="tasks"></div><p class="field-help"><?=$t('Schedule this command every minute in Hetzner. The caller returns within five seconds. Keep the command private; it contains the scheduler key.')?></p><button class="secondary" id="copy-cron"><?=$t('Copy cron command')?></button><?php endif ?>
+                    <?php if($admin): ?><div class="section-heading"><h2><?=$t('Scheduled maintenance')?></h2><span><?=$t('One cron, multiple tasks')?></span><button class="secondary" id="new-scheduled"><?=$t('+ Add request')?></button></div><div id="tasks"></div><p class="field-help"><?=$t('Schedule this command every minute in Hetzner. The caller returns within five seconds. Keep the command private; it contains the scheduler key.')?></p><button class="secondary" id="copy-cron"><?=$t('Copy cron command')?></button><?php endif ?>
                     <div class="section-heading"><h2><?=$t('Recent operations')?></h2><button class="text-button" data-page="activity"><?=$t('View activity →')?></button></div><div id="jobs"></div>
                     <p class="footnote"><?=$t('Keep this page open while an operation runs. If you leave, the scheduler continues it on its next visit. Saved stops release VMs; snapshots and persistent IPs remain billable.')?></p>
                 <?php else: ?>
@@ -138,6 +138,20 @@ $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View o
 </dialog>
 <dialog id="credentials-dialog" aria-labelledby="credentials-title"><button class="dialog-close" id="close-credentials" aria-label="<?=$t('Close')?>">×</button><h2 id="credentials-title"><?=$t('Service credentials')?></h2><p><?=$t('Keep these details private. Access is recorded.')?></p><form id="credentials-form"><div id="credential-fields"></div><?php if($admin): ?><p class="field-help"><?=$t('These are stored reference details. Editing them does not change the password on the server.')?></p><button class="primary" type="submit"><?=$t('Save details')?></button><?php endif ?></form></dialog>
 <?php if($admin): ?>
+<dialog id="scheduled-dialog" aria-labelledby="scheduled-title">
+    <form id="scheduled-form">
+        <button type="button" class="dialog-close" id="close-scheduled" aria-label="<?=$t('Close')?>">×</button>
+        <p class="eyebrow"><?=$t('SCHEDULED MAINTENANCE')?></p><h2 id="scheduled-title"><?=$t('Add a scheduled request')?></h2>
+        <p><?=$t('Enoch will call this HTTPS endpoint with the private bearer token after the provider cron has already returned.')?></p>
+        <input type="hidden" name="id">
+        <label><?=$t('Name')?><input name="name" maxlength="80" required></label>
+        <label><?=$t('HTTPS endpoint')?><input name="url" type="url" maxlength="2048" placeholder="https://example.org/api/maintenance" required></label>
+        <div class="form-pair"><label><?=$t('Method')?><select name="method"><option>POST</option><option>GET</option></select></label><label><?=$t('Every number of minutes')?><input name="interval_minutes" type="number" min="1" max="43200" value="60" required></label></div>
+        <label><?=$t('Bearer token')?><input name="bearer" type="password" maxlength="4096" autocomplete="new-password"><span id="bearer-help" class="field-help"><?=$t('Required when creating the request. The token is encrypted and is never shown again.')?></span></label>
+        <label class="check-label"><input name="enabled" type="checkbox" checked><?=$t('Run this request when it is due')?></label>
+        <div class="dialog-actions"><button type="button" id="delete-scheduled" class="stop" hidden><?=$t('Delete')?></button><button type="button" id="cancel-scheduled" class="secondary"><?=$t('Cancel')?></button><button class="primary"><?=$t('Save request')?></button></div>
+    </form>
+</dialog>
 <dialog id="account-dialog" aria-labelledby="account-title">
     <form id="account-form">
         <button type="button" class="dialog-close" id="close-account" aria-label="<?=$t('Close account settings')?>">×</button>

@@ -20,7 +20,17 @@ The command uses `--connect-timeout 2 --max-time 5`. PHP records receipt and sen
 
 Authenticated browser polling also advances existing jobs. Closing the browser is safe; cron continues the stored job. With hourly cron, progress will be correspondingly slow. If hosting kills post-response PHP execution, browser polling still works; inspect the Activity page and verify cron progress after deployment.
 
-Scheduled tasks live in `config/tasks.php`. Walk in the Spirit calls its existing `destroy-if-idle` endpoint. The game remains responsible for activity tracking and startup. Its secret is `GAME_SERVER_ADMIN_KEY`; the default check interval is 3600 seconds to preserve the previous hourly schedule. Set `GAME_IDLE_CHECK_INTERVAL=60` if desired. Running the outer cron every minute does not run every configured task every minute.
+The built-in Walk in the Spirit task remains in `config/tasks.php` and calls its
+existing `destroy-if-idle` endpoint. The game remains responsible for activity
+tracking and startup. Its secret is `GAME_SERVER_ADMIN_KEY`; the default check
+interval is 3600 seconds to preserve the previous hourly schedule.
+
+Administrators can also add, edit, pause and delete HTTPS requests under
+**Scheduled maintenance**. Each request uses GET or POST, a private Bearer token,
+and an interval from one minute to 30 days. Tokens are encrypted in SQLite with
+the same independent `var/credentials.key` used for service credentials. They are
+never returned to the browser after saving. Only one due outbound request runs per
+cron tick, and lifecycle work always has priority.
 
 ## Server lifecycle
 
@@ -29,8 +39,31 @@ Scheduled tasks live in `config/tasks.php`. Walk in the Spirit calls its existin
 - **Start:** restore the latest available managed snapshot, or power on an existing VM; wait across ticks for service health. Provider capacity is required and there is no automatic upgrade to a more expensive type.
 - **Save & stop:** prepare the application, gracefully shut down the VM, create and verify a snapshot from that exact VM, recheck IP retention and snapshot ownership, then delete the powered-off VM. Never force power-off or delete after an unverified snapshot.
 - Snapshot writes and VM creation carry a unique job label. An interrupted/ambiguous API call is reconciled by observed state, never blindly repeated.
-- Primary IPs and snapshots remain allocated and billable. Portal-created snapshots are deliberately retained; automatic pruning is not enabled.
+- Primary IPs and snapshots remain allocated and billable. The initial image and protected checkpoints are retained; only superseded unprotected current images are pruned.
 - Nextcloud and the shared Talk HPB are entirely independent. Stopping HPB affects both wolke and wolke2. No Nextcloud action implicitly starts or stops it.
+
+### Activity-aware automatic stops
+
+Restores performed by Enoch install a one-minute systemd activity timer on both
+Nextcloud and HPB. Nextcloud activity is detected from recent Apache requests,
+excluding health endpoints. HPB activity is detected from established signaling
+or TURN TCP connections. The VM sends a short authenticated heartbeat to
+`/activity.php` only while it is being used; no user address or request content is
+sent or stored.
+
+Enoch checks the cloud inventory at most every five minutes. A running Nextcloud
+VM with no heartbeat for 30 minutes, or an HPB VM quiet for 15 minutes, receives
+the ordinary durable stop request. The same clean shutdown, snapshot verification,
+checkpoint retention and persistent-IP checks apply. A VM started with snapshot
+saving disabled is stopped with that existing discard policy, leaving the prior
+current snapshot intact. A completed portal start resets the quiet-period grace
+time, so the server is not stopped while it is still becoming ready.
+
+Activity tokens are derived per service from the private `CRON_KEY` and injected
+through cloud-init; the key itself never reaches a VM. Rotating `CRON_KEY` requires
+the activity agent to be reinstalled by a later Enoch restore before automatic
+stops should be relied on. Servers started outside Enoch do not receive that
+restore-time agent automatically.
 
 Use only one controller for a given service at a time. The portal coordinates its own requests, but cannot lock out an administrator using hcloud, another portal deployment, or the legacy local script. Pause a job before intervening, inspect the actual cloud state, and then start a new operation. Pausing cannot cancel a cloud action already submitted.
 
@@ -90,7 +123,7 @@ python3 -m unittest discover -s infrastructure/tests
 composer audit --no-dev
 ```
 
-Unit tests use a fake cloud to exercise failed preparation, IP identity, snapshot provenance, interrupted writes, account permissions and scheduler deduplication. HTTP tests use an isolated temporary database and no real cloud token, and measure that the cron acknowledges before a delayed downstream task completes. Live checks are recorded separately in `docs/verification.md`.
+Unit tests use a fake cloud to exercise failed preparation, IP identity, snapshot provenance, protected checkpoints and ancestry, interrupted writes, activity-aware stops, encrypted scheduled requests, account permissions and scheduler deduplication. HTTP tests use an isolated temporary database and no real cloud token, verify heartbeat and managed-job authorization, and measure that the cron acknowledges before a delayed downstream task completes. Live checks are recorded separately in `docs/verification.md`.
 
 ## References
 
@@ -135,9 +168,20 @@ release the VM, then delete older unprotected managed images one per worker tick
 For a short time while a new image is being made there can be three snapshots.
 If cleanup fails, extra snapshots remain rather than risking the restore points.
 
-Advanced operators choose initial/current, the server type and whether this
-session is saved when it stops. A larger disk snapshot requires a larger future
-VM even if its compressed image is small. Explicit confirmation is required to
+An advanced operator can name a saved stop as a protected checkpoint. The engine
+creates the snapshot from the cleanly stopped VM, labels it as a checkpoint, and
+enables Hetzner deletion protection before releasing the VM. If protection cannot
+be verified, both the VM and snapshot are retained. Checkpoints are never automatic
+cleanup candidates. The newest checkpoint is also the current state until a later
+normal save; afterward it remains available by name in the restore selector.
+Restored VMs carry their source snapshot ID in the `enoch-source` server label.
+Each later current or checkpoint snapshot records that ID in `enoch-parent`, so a
+future interface can render the verified snapshot ancestry as a graph. Legacy VMs
+without trustworthy source metadata simply omit the parent label.
+
+Advanced operators choose initial/current/protected checkpoint, the server type
+and whether this session is saved when it stops. A larger disk snapshot requires
+a larger future VM even if its compressed image is small. Explicit confirmation is required to
 replace the current image with such an image. For a temporary large HPB instance,
 turn off snapshot saving; the previous current image remains compatible with the
 smaller VM. Discarding changes is clearly confirmed again at shutdown, including

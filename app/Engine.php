@@ -17,7 +17,7 @@ final class Engine {
         $this->store->query('UPDATE jobs SET phase=?,status=?,phase_since=?,updated=?,message=?,data=? WHERE id=?',[$phase,$status,time(),time(),$message,json_encode($job['data'],JSON_THROW_ON_ERROR),$job['id']]);
         $this->store->audit($job['actor'],$message,$job['service'].' · '.$job['id']);
     }
-    private function done(array &$j,string $message):void{$this->advance($j,'done',$message,[],'done');}
+    private function done(array &$j,string $message):void{if($j['operation']==='start')$this->store->set('activity:grace:'.$j['service'],time());$this->advance($j,'done',$message,[],'done');}
     // At most one phase per request; no sleep loops and no replay of ambiguous mutations.
     public function tick(): array {
         return $this->store->locked(function(){
@@ -32,7 +32,7 @@ final class Engine {
             catch(\Throwable $e){
                 // An intent is durable before every cloud write. Its next phase reconciles
                 // observed state, including when PHP died before saving an API response.
-                if(!$e instanceof CloudRejected&&in_array($j['phase'],['creating','powering','shutting-down','snapshotting','deleting'],true)&&time()-(int)$j['phase_since']<120){
+                if(!$e instanceof CloudRejected&&in_array($j['phase'],['creating','powering','shutting-down','snapshotting','protecting','deleting'],true)&&time()-(int)$j['phase_since']<120){
                     $this->store->query('UPDATE jobs SET message=? WHERE id=?',['Checking the result of a cloud request before continuing.',$j['id']]);
                 }else{$this->advance($j,'failed',$e->getMessage(),[],'failed');}
             }
@@ -66,13 +66,13 @@ final class Engine {
                 $image=$life->restore($cfg,$options);
                 $firewall=$this->cloud->request('GET','/firewalls/'.$cfg['firewall']);
                 if(!isset($firewall['firewall']))throw new \RuntimeException('Configured firewall is missing.');
-                $userData=Provision::cloudInit($this->config,$cfg);
+                $userData=Provision::cloudInit($this->config,$cfg,$j['service']);
                 $this->advance($j,'creating','Restoring the selected snapshot',['image'=>$image['id'],'save_snapshot'=>$options['save_snapshot']]);
                 $r=$this->cloud->request('POST','/servers',[
                     'name'=>$cfg['name'],'server_type'=>$options['type'],'location'=>$cfg['location'],'image'=>$image['id'],
                     'ssh_keys'=>$cfg['ssh_keys'],'firewalls'=>[['firewall'=>$cfg['firewall']]],
                     'public_net'=>['enable_ipv4'=>true,'enable_ipv6'=>true,'ipv4'=>$cfg['ipv4'],'ipv6'=>$cfg['ipv6']],
-                    'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'enoch-save'=>$options['save_snapshot']?'yes':'no'], 'start_after_create'=>true,
+                    'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'enoch-save'=>$options['save_snapshot']?'yes':'no','enoch-source'=>(string)$image['id']], 'start_after_create'=>true,
                     'user_data'=>$userData,
                 ]);
                 if(isset($r['server']['id']))$this->advance($j,'creating','Waiting for the restored VM',['server'=>$r['server']['id']]);return;
@@ -81,6 +81,7 @@ final class Engine {
             $save=$options['save_snapshot']??(($s['labels']['enoch-save']??'yes')!=='no');
             if(!$save&&empty($options['acknowledge_discard']))throw new \RuntimeException('This server is configured to discard changes. Confirm this before stopping.');
             $data=['server'=>$s['id'],'save_snapshot'=>$save];
+            if(isset($options['checkpoint_name']))$data['checkpoint_name']=$options['checkpoint_name'];
             if(!$save)$data['fallback']=$life->current($cfg)['id'];
             if($save){
                 $default=$this->cloud->all('server_types',['name'=>$cfg['type']])[0]??[];
@@ -135,10 +136,14 @@ final class Engine {
                 $i=$this->cloud->request('GET','/images/'.$j['data']['fallback'])['image']??[];$this->cloud->imageValid($i,$cfg);
                 $this->advance($j,'delete','Discard confirmed; previous snapshot verified',['image'=>$i['id']]);return;
             }
-            $this->advance($j,'snapshotting','Saving a snapshot');
+            $checkpoint=$j['data']['checkpoint_name']??null;$generation=gmdate('Ymd-His');
+            $parent=(string)($s['labels']['enoch-source']??$s['image']['id']??'');
+            $snapshotLabels=$cfg['labels']+['enoch-job'=>$j['id'],'generation'=>$generation,'enoch-kind'=>$checkpoint?'checkpoint':'current'];
+            if(ctype_digit($parent)&&(int)$parent>0)$snapshotLabels['enoch-parent']=$parent;
+            $this->advance($j,'snapshotting',$checkpoint?'Saving a protected checkpoint':'Saving a snapshot');
             $r=$this->cloud->request('POST','/servers/'.$s['id'].'/actions/create_image',[
-                'type'=>'snapshot','description'=>$cfg['name'].'-current-'.gmdate('Ymd-His'),
-                'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'generation'=>gmdate('Ymd-His')],
+                'type'=>'snapshot','description'=>$checkpoint?$cfg['name'].'-checkpoint-'.$checkpoint.'-'.$generation:$cfg['name'].'-current-'.$generation,
+                'labels'=>$snapshotLabels,
             ]);
             if(isset($r['image']['id']))$this->advance($j,'snapshotting','Waiting for snapshot verification',['image'=>$r['image']['id']]);return;
         case 'snapshotting':
@@ -149,20 +154,33 @@ final class Engine {
             $i=$images[0];
             if($i['status']==='creating')return;
             $this->cloud->imageValid($i,$cfg,$s['id']);
+            if(isset($j['data']['checkpoint_name'])){
+                if(($i['labels']['enoch-kind']??'')!=='checkpoint')throw new \RuntimeException('Checkpoint identity does not match. The VM is retained.');
+                $this->advance($j,'protecting','Enabling checkpoint deletion protection',['image'=>$i['id']]);
+                $this->cloud->request('POST','/images/'.$i['id'].'/actions/change_protection',['delete'=>true]);return;
+            }
             $this->advance($j,'delete','Snapshot verified; releasing VM capacity',['image'=>$i['id']]);return;
+        case 'protecting':
+            if(!$s||$s['status']!=='off')throw new \RuntimeException('Server changed while protecting its checkpoint. No deletion attempted.');
+            $i=$this->cloud->request('GET','/images/'.$j['data']['image'])['image']??[];
+            $this->cloud->imageValid($i,$cfg,$s['id']);
+            if(($i['labels']['enoch-kind']??'')!=='checkpoint')throw new \RuntimeException('Checkpoint identity does not match. The VM is retained.');
+            if(!empty($i['protection']['delete'])){$this->advance($j,'delete','Protected checkpoint verified; releasing VM capacity');return;}
+            if($age>300)throw new \RuntimeException('Checkpoint deletion protection was not confirmed. The VM and snapshot are retained.');return;
         case 'delete':
             if(!$s||$s['status']!=='off')throw new \RuntimeException('Server is no longer powered off. No deletion attempted.');
             $this->cloud->ips($cfg,$s);
             $i=$this->cloud->request('GET','/images/'.$j['data']['image'])['image']??[];
             $this->cloud->imageValid($i,$cfg,$save?$s['id']:null);
             if($save&&($i['labels']['enoch-job']??'')!==$j['id'])throw new \RuntimeException('Snapshot does not belong to this operation.');
+            if(isset($j['data']['checkpoint_name'])&&(($i['labels']['enoch-kind']??'')!=='checkpoint'||empty($i['protection']['delete'])))throw new \RuntimeException('Checkpoint protection is missing. The VM is retained.');
             $this->advance($j,'deleting','Releasing VM; keeping IPs and snapshots');
             $this->cloud->request('DELETE','/servers/'.$s['id']);return;
         case 'deleting':
-            if(!$s){if($save)$this->advance($j,'pruning','VM released; retaining the initial and current snapshots');else $this->done($j,'Stopped without saving; previous snapshots retained');return;}
+            if(!$s){if($save)$this->advance($j,'pruning','VM released; retaining current state and protected checkpoints');else $this->done($j,'Stopped without saving; previous snapshots retained');return;}
             if($age>300)throw new \RuntimeException('Deletion was not confirmed. The verified snapshot is retained. Inspect Hetzner before retrying.');return;
         case 'pruning':
-            if(!$life->pruneOne($cfg,(int)$j['data']['image']))$this->done($j,'Stopped and saved; initial and current snapshots retained');return;
+            if(!$life->pruneOne($cfg,(int)$j['data']['image']))$this->done($j,isset($j['data']['checkpoint_name'])?'Protected checkpoint saved; server stopped':'Stopped and saved; initial, current and protected checkpoint snapshots retained');return;
         default:throw new \RuntimeException('Unknown operation phase.');
         }
     }
@@ -181,8 +199,8 @@ final class Engine {
         $serverError=null;
         try{$servers=$this->cloud->all('servers');}catch(\Throwable $e){$servers=[];$serverError=$e;}
         foreach($this->config->services as $id=>$cfg){
-            try{if($serverError)throw $serverError;$s=$this->cloud->server($cfg,$servers);$images=$this->cloud->images($cfg);$latest=null;foreach($images as $image)if($image['status']==='available'){$latest=$image;break;}
-                $cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>$s['status']??'saved','type'=>$s['server_type']['name']??$cfg['type'],'location'=>$cfg['location'],'ip'=>$s['public_net']['ipv4']['ip']??null,'save_snapshot'=>($s['labels']['enoch-save']??'yes')!=='no','snapshot'=>$latest?['id'=>$latest['id'],'created'=>$latest['created'],'size'=>$latest['image_size']??null,'disk'=>$latest['disk_size']]:null,'initial_image'=>$cfg['initial_image'],'snapshots'=>count($images)+((!in_array($cfg['initial_image'],array_column($images,'id'),true))?1:0),'error'=>null];
+            try{if($serverError)throw $serverError;$s=$this->cloud->server($cfg,$servers);$images=$this->cloud->images($cfg);$latest=null;foreach($images as $image)if($image['status']==='available'){$latest=$image;break;}$checkpoints=count(array_filter($images,fn($image)=>(($image['labels']['enoch-kind']??'')==='checkpoint'&&!empty($image['protection']['delete']))));
+                $cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>$s['status']??'saved','type'=>$s['server_type']['name']??$cfg['type'],'location'=>$cfg['location'],'ip'=>$s['public_net']['ipv4']['ip']??null,'save_snapshot'=>($s['labels']['enoch-save']??'yes')!=='no','snapshot'=>$latest?['id'=>$latest['id'],'created'=>$latest['created'],'size'=>$latest['image_size']??null,'disk'=>$latest['disk_size']]:null,'initial_image'=>$cfg['initial_image'],'snapshots'=>count($images)+((!in_array($cfg['initial_image'],array_column($images,'id'),true))?1:0),'checkpoints'=>$checkpoints,'error'=>null];
             }catch(\Throwable $e){$cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>'unknown','error'=>$e->getMessage()];}
         }
         $result=['checked'=>time(),'services'=>$cards];$this->store->set('dashboard',$result);return $result;

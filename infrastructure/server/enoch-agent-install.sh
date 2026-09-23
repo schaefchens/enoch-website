@@ -80,7 +80,8 @@ def emit(state):
     print(json.dumps({'state': state})); sys.exit(0)
 command = os.environ.get('SSH_ORIGINAL_COMMAND', '')
 if command == 'probe':
-    emit('installed' if os.access('/usr/local/sbin/nextcloud-aio-stop-siblings', os.X_OK) else 'failed')
+    required = ('/usr/local/sbin/nextcloud-aio-stop-siblings', '/usr/local/sbin/enoch-activity-heartbeat')
+    emit('installed' if all(os.access(path, os.X_OK) for path in required) else 'failed')
 match = re.fullmatch(r'(prepare|status) ([a-f0-9]{24})', command)
 if not match:
     print('Command not permitted', file=sys.stderr); sys.exit(1)

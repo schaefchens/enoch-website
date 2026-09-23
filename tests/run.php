@@ -1,19 +1,20 @@
 <?php
 declare(strict_types=1);
 require dirname(__DIR__).'/vendor/autoload.php';
-use Enoch\{Auth,Cloud,Config,Engine,Host,Scheduler,Store};
+use Enoch\{Activity,ActivityMonitor,Auth,Cloud,Config,Engine,Host,ScheduledJobs,Scheduler,Store};
 $checks=0;
 function check(bool $value,string $label):void{global $checks;if(!$value)throw new RuntimeException('FAIL: '.$label);$checks++;echo "PASS $label\n";}
 function refuses(callable $fn):bool{try{$fn();return false;}catch(Throwable){return true;}}
 final class FakeCloud extends Cloud {
     public array $servers=[],$images=[],$calls=[];
+    public int $nextImageId=21;
     public bool $missingInitial=false,$unsafeIP=false,$loseSnapshotResponse=false,$loseCreateResponse=false,$rejectSnapshot=false;
     public function __construct(public array $cfg){parent::__construct('fake');}
     public function seed(string $state='running'):array {
-        $s=['id'=>10,'name'=>$this->cfg['name'],'status'=>$state,'labels'=>[], 'public_net'=>['ipv4'=>['id'=>$this->cfg['ipv4'],'ip'=>'192.0.2.1'],'ipv6'=>['id'=>$this->cfg['ipv6']]],'server_type'=>['name'=>$this->cfg['type']]];
+        $s=['id'=>10,'name'=>$this->cfg['name'],'status'=>$state,'labels'=>[],'image'=>['id'=>$this->cfg['initial_image']], 'public_net'=>['ipv4'=>['id'=>$this->cfg['ipv4'],'ip'=>'192.0.2.1'],'ipv6'=>['id'=>$this->cfg['ipv6']]],'server_type'=>['name'=>$this->cfg['type']]];
         $this->servers=[$s];return $s;
     }
-    public function image(array $labels=[]):array{return ['id'=>20,'created'=>'2026-09-22T00:00:00Z','type'=>'snapshot','status'=>'available','created_from'=>['id'=>10],'architecture'=>'x86','disk_size'=>40,'labels'=>$this->cfg['labels']+$labels];}
+    public function image(array $labels=[]):array{return ['id'=>20,'description'=>'test-current','created'=>'2026-09-22T00:00:00Z','type'=>'snapshot','status'=>'available','created_from'=>['id'=>10],'architecture'=>'x86','disk_size'=>40,'protection'=>['delete'=>false],'labels'=>$this->cfg['labels']+$labels];}
     public function request(string $method,string $path,?array $body=null):array{
         if($method!=='GET')$this->calls[]=[$method,$path,$body];
         if($method==='GET'){
@@ -31,6 +32,7 @@ final class FakeCloud extends Cloud {
         }
         if($method==='POST'&&$path==='/servers'){
             $s=$this->seed();$this->servers[0]['labels']=$body['labels'];
+            $this->servers[0]['image']=['id'=>(int)$body['image']];
             if($this->loseCreateResponse)throw new RuntimeException('Lost create response');
             return ['server'=>$this->servers[0]];
         }
@@ -38,9 +40,13 @@ final class FakeCloud extends Cloud {
         if(str_ends_with($path,'/shutdown')){$this->servers[0]['status']='off';return ['action'=>['id'=>2]];}
         if(str_ends_with($path,'/create_image')){
             if($this->rejectSnapshot)throw new RuntimeException('Snapshot failed');
-            $i=$this->image($body['labels']);$i['labels']=$body['labels'];$i['created']=gmdate('c');$i['id']=21;$this->images[]=$i;
+            $i=$this->image($body['labels']);$i['labels']=$body['labels'];$i['description']=$body['description'];$i['id']=$this->nextImageId++;$i['created']=gmdate('c',time()+$i['id']);$this->images[]=$i;
             if($this->loseSnapshotResponse)throw new RuntimeException('Lost snapshot response');
             return ['image'=>$i];
+        }
+        if($method==='POST'&&preg_match('#^/images/([0-9]+)/actions/change_protection$#',$path,$m)){
+            foreach($this->images as &$image)if((int)$image['id']===(int)$m[1])$image['protection']['delete']=(bool)($body['delete']??false);unset($image);
+            return ['action'=>['id'=>3,'status'=>'success']];
         }
         if($method==='DELETE'&&str_starts_with($path,'/images/')){$this->images=array_values(array_filter($this->images,fn($i)=>$i['id']!==(int)basename($path)));return [];}
         if($method==='DELETE'){$this->servers=[];return ['action'=>['id'=>4]];}
@@ -55,7 +61,7 @@ final class FakeHost extends Host {
     public function command(array $s,string $command):array{$this->commands[]=$command;return ['state'=>$command==='probe'?'installed':$this->state];}
     public function ready(array $cfg):bool{return $this->healthy;}
 }
-$root=dirname(__DIR__);$private=sys_get_temp_dir().'/enoch-keys-'.bin2hex(random_bytes(8));mkdir($private.'/ssh',0700,true);file_put_contents($private.'/ssh/enoch.pub','ssh-ed25519 AAAA test');putenv('ENOCH_DATA_DIR='.$private);$config=new Config($root);$dirs=[];
+$root=dirname(__DIR__);$private=sys_get_temp_dir().'/enoch-keys-'.bin2hex(random_bytes(8));mkdir($private.'/ssh',0700,true);file_put_contents($private.'/ssh/enoch.pub','ssh-ed25519 AAAA test');putenv('ENOCH_DATA_DIR='.$private);putenv('CRON_KEY='.str_repeat('c',64));putenv('APP_URL=https://enoch.example.org');$config=new Config($root);$dirs=[];
 function fixture(string $service='nextcloud'):array{
     global $config,$dirs;
     $dir=sys_get_temp_dir().'/enoch-test-'.bin2hex(random_bytes(8));$dirs[]=$dir;
@@ -97,6 +103,7 @@ try{
     [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$c->loseCreateResponse=true;$e->enqueue('nextcloud','start','alice');for($n=0;$n<5;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&count($c->calls)===1,'lost create response reconciles using job label and pinned IPs');
     check($c->calls[0][2]['public_net']['ipv4']===$config->services['nextcloud']['ipv4'],'restore uses the persistent addresses');
+    check(str_contains($c->calls[0][2]['user_data'],'enoch-activity-heartbeat.timer')&&str_contains($c->calls[0][2]['user_data'],'activity.php')&&!str_contains($c->calls[0][2]['user_data'],str_repeat('c',64)),'restore installs the activity timer without disclosing the scheduler key');
     [$s,$c,$h,$e]=fixture('hpb');$c->seed();$e->enqueue('hpb','stop','alice');for($n=0;$n<10;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&!$h->commands,'HPB lifecycle is independent of Nextcloud');
     [$s,$c,$h,$e]=fixture();$auth=new Auth($config,$s);$auth->addUser('alice','test-password-long','operator');
@@ -112,9 +119,42 @@ try{
     $scheduler->runDue();$scheduler->runDue();check($calls===1,'rapid cron ticks run a scheduled task only when due');
     check(!str_contains(json_encode($s->query('SELECT * FROM audit')->fetchAll()),'test-secret-never-log'),'scheduled task secret is absent from audit log');
     $s->set('task:spirit-idle',['attempted'=>0]);$scheduler=new Scheduler($config,$s,fn($url)=>[403,['status'=>'error']]);$r=$scheduler->runDue();check($r['status']==='failed','scheduler records downstream authentication failure');
+    $managedCalls=[];$managed=new ScheduledJobs($config,$s,function($method,$url,$token)use(&$managedCalls){$managedCalls[]=[$method,$url,$token];return 204;});
+    $managedId=$managed->save(['name'=>'Remote upkeep','url'=>'https://maintenance.example.org/run','method'=>'POST','interval_seconds'=>60,'enabled'=>true,'bearer'=>'managed-test-secret']);
+    $stored=$s->query('SELECT bearer FROM scheduled_jobs WHERE id=?',[$managedId])->fetchColumn();
+    check(!str_contains($stored,'managed-test-secret')&&$managed->all()[0]['has_bearer'],'managed bearer token is encrypted and never returned by the task listing');
+    $row=$managed->due();$result=$managed->execute($row);check($result['status']==='ok'&&$managedCalls===[['POST','https://maintenance.example.org/run','managed-test-secret']],'managed request sends its bearer token only to the configured HTTPS endpoint');
+    $managed->save(['id'=>$managedId,'name'=>'Remote upkeep','url'=>'https://maintenance.example.org/run','method'=>'GET','interval_seconds'=>120,'enabled'=>false,'bearer'=>'']);
+    check($managed->all()[0]['method']==='GET'&&!$managed->all()[0]['enabled']&&$managed->due()===null,'managed request can be edited, paused and retain its encrypted token');
+    check(refuses(fn()=>$managed->save(['name'=>'Unsafe','url'=>'http://127.0.0.1/private','method'=>'GET','interval_seconds'=>60,'enabled'=>true,'bearer'=>'x'])),'managed requests reject non-HTTPS and private literal targets');
+    $managed->delete($managedId);check($managed->all()===[],'managed request and its execution state can be deleted');
+    putenv('CRON_KEY='.str_repeat('c',64));$token=Activity::token($config,'nextcloud');Activity::record($config,$s,'nextcloud',$token);
+    check(($s->get('activity:nextcloud')['last_seen']??0)>0&&$token!==Activity::token($config,'hpb')&&refuses(fn()=>Activity::record($config,$s,'nextcloud','wrong')),'activity heartbeats require a distinct service-specific token');
+    [$as,$ac,$ah,$ae]=fixture();$ac->seed();$ac->servers[0]['created']=gmdate('c',time()-4000);$as->set('activity:nextcloud',['last_seen'=>time()-4000]);
+    (new ActivityMonitor($config,$as,$ac,$ae))->runDue();$automatic=$as->query("SELECT * FROM jobs WHERE status='active'")->fetch();
+    check($automatic&&$automatic['operation']==='stop'&&$automatic['actor']==='automatic inactivity monitor','quiet running service queues the ordinary safe stop workflow');
     [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];$e->enqueue('nextcloud','stop','alice');for($n=0;$n<15;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&array_column($c->images,'id')===[21],'verified new snapshot replaces previous current snapshot');
     check(!array_filter($c->calls,fn($a)=>$a[0]==='DELETE'&&$a[1]==='/images/'.$c->cfg['initial_image']),'protected initial is never pruned');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image(['enoch-kind'=>'current'])];$e->enqueue('nextcloud','stop','alice',['checkpoint_name'=>'Before upgrade']);for($n=0;$n<16;$n++)$j=tick($s,$c,$h);
+    $checkpoint=$c->images[0]??[];$paths=array_column($c->calls,1);
+    check($j['status']==='done'&&($checkpoint['labels']['enoch-kind']??'')==='checkpoint'&&!empty($checkpoint['protection']['delete']),'checkpoint is protected before the VM is released');
+    check(($checkpoint['labels']['enoch-parent']??null)===(string)$c->cfg['initial_image'],'checkpoint records the snapshot used to create its VM');
+    $protectAt=array_search('/images/21/actions/change_protection',$paths,true);$deleteAt=array_search('/servers/10',$paths,true);
+    check($protectAt!==false&&$deleteAt!==false&&$protectAt<$deleteAt,'checkpoint protection precedes VM deletion');
+    check(str_contains($checkpoint['description'],'checkpoint-Before upgrade'),'checkpoint name is kept in its snapshot description');
+    $e->enqueue('nextcloud','start','alice',['source'=>'checkpoint:21']);for($n=0;$n<5;$n++)$j=tick($s,$c,$h);
+    $creates=array_values(array_filter($c->calls,fn($call)=>$call[0]==='POST'&&$call[1]==='/servers'));
+    check($j['status']==='done'&&end($creates)[2]['image']===21&&end($creates)[2]['labels']['enoch-source']==='21','protected checkpoint can restore a VM and records its source');
+    $e->enqueue('nextcloud','stop','alice');for($n=0;$n<16;$n++)$j=tick($s,$c,$h);
+    $current=array_values(array_filter($c->images,fn($image)=>($image['labels']['enoch-kind']??'')==='current'))[0]??[];
+    check($j['status']==='done'&&($current['labels']['enoch-parent']??null)==='21','later snapshots record the checkpoint as their parent');
+    $kept=array_values(array_filter($c->images,fn($image)=>$image['id']===21))[0]??[];
+    check(count($c->images)===2&&!empty($kept['protection']['delete']),'later current saves never prune protected checkpoints');
+    [$s,$c,$h,$e]=fixture();$unprotected=$c->image(['enoch-kind'=>'checkpoint']);$c->images=[$unprotected];$e->enqueue('nextcloud','start','alice',['source'=>'checkpoint:20']);$j=tick($s,$c,$h);
+    check($j['status']==='failed'&&!$c->calls,'an unprotected checkpoint cannot be restored');
+    [$s,$c,$h,$e]=fixture();$c->seed();
+    check(refuses(fn()=>$e->enqueue('nextcloud','stop','alice',['checkpoint_name'=>'']))&&refuses(fn()=>$e->enqueue('nextcloud','stop','alice',['checkpoint_name'=>str_repeat('x',49)])),'checkpoint names are validated before a job is queued');
     [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];
     check(refuses(fn()=>$e->enqueue('nextcloud','stop','alice',['save_snapshot'=>false])),'discard requires explicit acknowledgement');
     $e->enqueue('nextcloud','stop','alice',['save_snapshot'=>false,'acknowledge_discard'=>true]);for($n=0;$n<12;$n++)$j=tick($s,$c,$h);
@@ -134,6 +174,9 @@ try{
     check(!$saved['services'][0]['allocated'],'saved simple service cannot expose an inapplicable stop control');
     $vault=new Enoch\Vault($config,$s);$vault->save('nextcloud',['admin_password'=>'private-test-value']);
     check($vault->read('nextcloud')['admin_password']==='private-test-value'&&!str_contains(json_encode($s->get('credentials:nextcloud')),'private-test-value'),'credentials are encrypted at rest and decrypt correctly');
+    $legacyIv=random_bytes(12);$legacyTag='';$legacyPlain=json_encode(['turn_secret'=>'preserved-legacy-value'],JSON_THROW_ON_ERROR);$legacyCipher=openssl_encrypt($legacyPlain,'aes-256-gcm',file_get_contents($private.'/credentials.key'),OPENSSL_RAW_DATA,$legacyIv,$legacyTag,'hpb');
+    $s->set('credentials:hpb',['iv'=>base64_encode($legacyIv),'tag'=>base64_encode($legacyTag),'data'=>base64_encode($legacyCipher)]);
+    check($vault->read('hpb')['turn_secret']==='preserved-legacy-value','existing production credential ciphertext remains readable after the shared secret-store upgrade');
     check(refuses(fn()=>$vault->save('nextcloud',['unknown'=>'value'])),'credential field allowlist enforced');
     $s->migrateAccess(array_keys($config->services));check(count($auth->access->grants($u))===1,'migration reruns do not expand grants');
     echo "\n$checks checks passed. No real cloud mutations were made.\n";

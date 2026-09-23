@@ -16,6 +16,7 @@ return [
         'ipv4' => 150948650, 'ipv6' => 150948651, 'firewall' => 11663891, 'ssh_keys' => [100740697],
         'labels' => ['service' => 'nextcloud-aio', 'instance' => 'wolke2', 'lifecycle' => 'managed'],
         'prepare' => 'aio', 'ready_url' => 'https://wolke2.schaefchens.de/status.php', 'ready_kind' => 'nextcloud',
+        'activity_kind' => 'nextcloud', 'idle_timeout' => 1800,
     ],
     'hpb' => [
         'title' => 'Talk backend', 'subtitle' => 'Shared signaling & calls', 'domain' => 'hpb.schaefchens.de',
@@ -30,5 +31,6 @@ return [
         'ipv4' => 97117715, 'ipv6' => 97117717, 'firewall' => 11602103, 'ssh_keys' => [100740697],
         'labels' => ['service' => 'nextcloud-talk-hpb', 'lifecycle' => 'managed'],
         'prepare' => null, 'ready_url' => 'https://hpb.schaefchens.de/api/v1/welcome', 'ready_kind' => 'hpb',
+        'activity_kind' => 'hpb', 'idle_timeout' => 900,
     ],
 ];

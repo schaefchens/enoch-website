@@ -17,7 +17,8 @@ final class Store {
         CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time INTEGER NOT NULL, actor TEXT NOT NULL, event TEXT NOT NULL, detail TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS attempts (key TEXT NOT NULL, time INTEGER NOT NULL);
-        CREATE INDEX IF NOT EXISTS attempts_time ON attempts(time);");
+        CREATE INDEX IF NOT EXISTS attempts_time ON attempts(time);
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, method TEXT NOT NULL, interval_seconds INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, bearer TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL);");
     }
     public function migrateAccess(array $services): void {
         if($this->get('access_schema',0)>=2)return;

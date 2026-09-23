@@ -6,9 +6,16 @@ final class Scheduler {
     public function __construct(private Config $config,private Store $store,private ?\Closure $transport=null) {}
     public function runDue():array {
         return $this->store->locked(function(){
+            $managedJobs=new ScheduledJobs($this->config,$this->store);$managed=$managedJobs->due();$legacy=null;
             foreach($this->config->tasks as $id=>$task){
                 $state=$this->store->get('task:'.$id,[]);$interval=max(60,(int)$this->config->get($task['interval_env'],(string)$task['interval']));
                 if(time()-($state['attempted']??0)<$interval)continue;
+                $candidate=['id'=>$id,'task'=>$task,'attempted'=>(int)($state['attempted']??0)];
+                if($legacy===null||$candidate['attempted']<$legacy['attempted'])$legacy=$candidate;
+            }
+            if($managed&&(!$legacy||$managed['_attempted']<=$legacy['attempted']))return $managedJobs->execute($managed);
+            if($legacy){
+                $id=$legacy['id'];$task=$legacy['task'];
                 $secret=$this->config->get($task['key_env']);
                 $state=['attempted'=>time(),'status'=>'running','message'=>'Request sent to the game controller'];$this->store->set('task:'.$id,$state);
                 try{
