@@ -1,0 +1,1490 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# ============================================================
+# Configuration
+# ============================================================
+
+SERVER_NAME="hpb.schaefchens.de"
+
+# Default server type.
+#
+# Override:
+#
+#   ./highperformancebackend.sh --type ccx23
+#   ./highperformancebackend.sh -t ccx23
+#
+SERVER_TYPE="cpx12"
+
+LOCATION="fsn1"
+
+PRIMARY_IPV4="primary_ip-97117715-hpb-schaefchens"
+PRIMARY_IPV6="primary_ip-97117717-hpb-schaefchens"
+
+SSH_KEY="abraham@der-weg-des-herrn.de"
+
+FIREWALL="firewall-hpb-schaefchens"
+
+HPB_URL="https://hpb.schaefchens.de"
+
+
+# ============================================================
+# Base snapshot
+#
+# Enter the ID of your manually created initial snapshot here.
+#
+# Example:
+#
+# BASE_SNAPSHOT_ID="123456789"
+#
+# It can then be used with:
+#
+#   ./highperformancebackend.sh --base
+#
+# You can also override it directly:
+#
+#   ./highperformancebackend.sh --base-snapshot 123456789
+#
+# IMPORTANT:
+#
+# The base snapshot does NOT get lifecycle=managed and is
+# therefore never deleted by the lifecycle cleanup below.
+# ============================================================
+
+BASE_SNAPSHOT_ID=""
+
+
+# ============================================================
+# Runtime options
+# ============================================================
+
+SKIP_SNAPSHOT=false
+USE_BASE_SNAPSHOT=false
+BASE_SNAPSHOT_OVERRIDE=""
+
+
+# ============================================================
+# Lifecycle snapshots
+#
+# Only snapshots created by the normal lifecycle mechanism
+# receive these labels.
+# ============================================================
+
+SNAPSHOT_SELECTOR="service=nextcloud-talk-hpb,lifecycle=managed"
+
+
+# ============================================================
+# Timing
+# ============================================================
+
+HPB_CHECK_ATTEMPTS=90
+HPB_CHECK_INTERVAL=2
+
+SHUTDOWN_CHECK_ATTEMPTS=90
+SHUTDOWN_CHECK_INTERVAL=2
+
+SNAPSHOT_CHECK_ATTEMPTS=300
+SNAPSHOT_CHECK_INTERVAL=2
+
+API_RETRIES=10
+API_RETRY_INTERVAL=2
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+log() {
+    printf '\n==> %s\n' "$*"
+}
+
+warn() {
+    printf '\nWARNING: %s\n' "$*" >&2
+}
+
+die() {
+    printf '\nERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+
+# ============================================================
+# Required commands
+# ============================================================
+
+command -v hcloud >/dev/null 2>&1 || \
+    die "hcloud is not installed."
+
+command -v curl >/dev/null 2>&1 || \
+    die "curl is not installed."
+
+command -v awk >/dev/null 2>&1 || \
+    die "awk is not installed."
+
+
+# ============================================================
+# Command line arguments
+# ============================================================
+
+while [[ $# -gt 0 ]]; do
+
+    case "$1" in
+
+        -t|--type)
+
+            [[ $# -ge 2 ]] || \
+                die "Missing value for $1"
+
+            SERVER_TYPE="$2"
+            shift 2
+            ;;
+
+
+        --type=*)
+
+            SERVER_TYPE="${1#*=}"
+
+            [[ -n "$SERVER_TYPE" ]] || \
+                die "Missing value for --type"
+
+            shift
+            ;;
+
+
+        -b|--base)
+
+            USE_BASE_SNAPSHOT=true
+            shift
+            ;;
+
+
+        --base-snapshot)
+
+            [[ $# -ge 2 ]] || \
+                die "Missing value for --base-snapshot"
+
+            BASE_SNAPSHOT_OVERRIDE="$2"
+            USE_BASE_SNAPSHOT=true
+
+            shift 2
+            ;;
+
+
+        --base-snapshot=*)
+
+            BASE_SNAPSHOT_OVERRIDE="${1#*=}"
+
+            [[ -n "$BASE_SNAPSHOT_OVERRIDE" ]] || \
+                die "Missing value for --base-snapshot"
+
+            USE_BASE_SNAPSHOT=true
+
+            shift
+            ;;
+
+
+        -S|--skip-snapshot)
+
+            SKIP_SNAPSHOT=true
+            shift
+            ;;
+
+
+        -h|--help)
+
+            cat <<EOF
+Usage:
+
+  $0 [OPTIONS]
+
+
+Options:
+
+  -t, --type TYPE
+
+      Override the Hetzner server type.
+
+      Default:
+
+        ${SERVER_TYPE}
+
+
+  -b, --base
+
+      Restore the server from BASE_SNAPSHOT_ID instead of
+      the newest managed lifecycle snapshot.
+
+
+  --base-snapshot ID
+
+      Restore from the specified snapshot ID or name.
+
+      This overrides BASE_SNAPSHOT_ID and also enables
+      base snapshot mode.
+
+
+  -S, --skip-snapshot
+
+      Do not create a new snapshot when shutting down.
+
+      The existing managed lifecycle snapshot remains
+      untouched.
+
+
+  -h, --help
+
+      Show this help.
+
+
+Examples:
+
+  Normal lifecycle:
+
+    $0
+
+
+  Start larger server:
+
+    $0 --type ccx23
+
+
+  Start configured base snapshot:
+
+    $0 --base
+
+
+  Start explicit snapshot:
+
+    $0 --base-snapshot 123456789
+
+
+  Restore base, run large server, discard all changes:
+
+    $0 --base --type ccx23 --skip-snapshot
+
+
+  Short form:
+
+    $0 -b -t ccx23 -S
+
+EOF
+
+            exit 0
+            ;;
+
+
+        *)
+
+            die "Unknown argument:
+
+  $1
+
+Use:
+
+  $0 --help"
+            ;;
+
+    esac
+
+done
+
+
+# ============================================================
+# Hetzner API
+# ============================================================
+
+log "Checking Hetzner Cloud API"
+
+if ! hcloud server list >/dev/null 2>&1; then
+
+    die "Could not access Hetzner Cloud.
+
+Check:
+
+  hcloud context active
+
+or your HCLOUD_TOKEN / HCLOUD_CONTEXT configuration."
+
+fi
+
+
+# ============================================================
+# Validate server type
+# ============================================================
+
+if ! hcloud server-type describe "$SERVER_TYPE" \
+    >/dev/null 2>&1
+then
+
+    die "Unknown or unavailable Hetzner server type:
+
+  ${SERVER_TYPE}"
+
+fi
+
+log "Selected server type: ${SERVER_TYPE}"
+
+
+# ============================================================
+# Runtime mode
+# ============================================================
+
+if [[ "$USE_BASE_SNAPSHOT" == true ]]; then
+
+    log "Startup snapshot mode: BASE"
+
+else
+
+    log "Startup snapshot mode: LATEST MANAGED"
+
+fi
+
+
+if [[ "$SKIP_SNAPSHOT" == true ]]; then
+
+    log "Snapshot creation on shutdown: DISABLED"
+
+else
+
+    log "Snapshot creation on shutdown: ENABLED"
+
+fi
+
+
+# ============================================================
+# Server exists
+# ============================================================
+
+server_exists() {
+
+    local output
+    local i
+
+    for i in $(seq 1 "$API_RETRIES"); do
+
+        if output="$(
+            hcloud server list \
+                -o noheader \
+                -o columns=name \
+                2>/dev/null
+        )"
+        then
+
+            if grep -Fxq "$SERVER_NAME" <<<"$output"; then
+                return 0
+            else
+                return 1
+            fi
+
+        fi
+
+        sleep "$API_RETRY_INTERVAL"
+
+    done
+
+    die "Could not reliably query the Hetzner server list."
+}
+
+
+# ============================================================
+# Server status
+# ============================================================
+
+get_server_status() {
+
+    local status
+    local i
+
+    for i in $(seq 1 "$API_RETRIES"); do
+
+        if status="$(
+            hcloud server describe \
+                "$SERVER_NAME" \
+                -o format='{{.Status}}' \
+                2>/dev/null
+        )"
+        then
+
+            if [[ -n "$status" ]]; then
+
+                printf '%s\n' "$status"
+                return 0
+
+            fi
+
+        fi
+
+        sleep "$API_RETRY_INTERVAL"
+
+    done
+
+    return 1
+}
+
+
+# ============================================================
+# Latest managed lifecycle snapshot
+# ============================================================
+
+get_latest_snapshot_id() {
+
+    local result
+    local i
+
+    for i in $(seq 1 "$API_RETRIES"); do
+
+        if result="$(
+            hcloud image list \
+                --type snapshot \
+                --selector "$SNAPSHOT_SELECTOR" \
+                --sort created:desc \
+                -o noheader \
+                -o columns=id,status \
+                2>/dev/null
+        )"
+        then
+
+            awk \
+                '$2 == "available" {print $1; exit}' \
+                <<<"$result"
+
+            return 0
+
+        fi
+
+        sleep "$API_RETRY_INTERVAL"
+
+    done
+
+    die "Could not query lifecycle snapshots."
+}
+
+
+# ============================================================
+# Resolve base snapshot
+# ============================================================
+
+get_base_snapshot_id() {
+
+    local snapshot_id
+    local status
+
+    if [[ -n "$BASE_SNAPSHOT_OVERRIDE" ]]; then
+
+        snapshot_id="$BASE_SNAPSHOT_OVERRIDE"
+
+    else
+
+        snapshot_id="$BASE_SNAPSHOT_ID"
+
+    fi
+
+
+    [[ -n "$snapshot_id" ]] || \
+        die "Base snapshot mode requested but no base snapshot
+was configured.
+
+Either set:
+
+  BASE_SNAPSHOT_ID=\"123456789\"
+
+inside the script, or use:
+
+  $0 --base-snapshot 123456789"
+
+
+    if ! hcloud image describe "$snapshot_id" \
+        >/dev/null 2>&1
+    then
+
+        die "Base snapshot does not exist or cannot be accessed:
+
+  ${snapshot_id}"
+
+    fi
+
+
+    status="$(
+        hcloud image describe \
+            "$snapshot_id" \
+            -o format='{{.Status}}' \
+            2>/dev/null \
+            || true
+    )"
+
+
+    if [[ "$status" != "available" ]]; then
+
+        die "Base snapshot is not available.
+
+Snapshot:
+
+  ${snapshot_id}
+
+Status:
+
+  ${status:-unknown}"
+
+    fi
+
+
+    printf '%s\n' "$snapshot_id"
+}
+
+
+# ============================================================
+# HPB health check
+# ============================================================
+
+wait_for_hpb() {
+
+    local body
+    local i
+
+    for i in $(seq 1 "$HPB_CHECK_ATTEMPTS"); do
+
+        body="$(
+            curl \
+                -fsS \
+                --connect-timeout 3 \
+                --max-time 10 \
+                "${HPB_URL}/api/v1/welcome" \
+                2>/dev/null \
+                || true
+        )"
+
+        if grep -q \
+            'nextcloud-spreed-signaling' \
+            <<<"$body"
+        then
+
+            return 0
+
+        fi
+
+        printf \
+            'Waiting for HPB... (%s/%s)\r' \
+            "$i" \
+            "$HPB_CHECK_ATTEMPTS"
+
+        sleep "$HPB_CHECK_INTERVAL"
+
+    done
+
+    echo
+    return 1
+}
+
+
+# ============================================================
+# Wait for server OFF
+# ============================================================
+
+wait_for_server_off() {
+
+    local status
+    local i
+
+    for i in $(seq 1 "$SHUTDOWN_CHECK_ATTEMPTS"); do
+
+        status="$(
+            get_server_status 2>/dev/null \
+            || true
+        )"
+
+        if [[ "$status" == "off" ]]; then
+
+            echo
+            return 0
+
+        fi
+
+        printf \
+            'Waiting for shutdown... status=%s (%s/%s)\r' \
+            "${status:-API-error}" \
+            "$i" \
+            "$SHUTDOWN_CHECK_ATTEMPTS"
+
+        sleep "$SHUTDOWN_CHECK_INTERVAL"
+
+    done
+
+    echo
+    return 1
+}
+
+
+# ============================================================
+# Wait for snapshot
+# ============================================================
+
+wait_for_snapshot() {
+
+    local generation="$1"
+    local status
+    local result
+    local i
+
+    for i in $(seq 1 "$SNAPSHOT_CHECK_ATTEMPTS"); do
+
+        result="$(
+            hcloud image list \
+                --type snapshot \
+                --selector \
+                    "${SNAPSHOT_SELECTOR},generation=${generation}" \
+                -o noheader \
+                -o columns=status \
+                2>/dev/null \
+                || true
+        )"
+
+        status="$(
+            awk \
+                'NF {print $1; exit}' \
+                <<<"$result"
+        )"
+
+        case "$status" in
+
+            available)
+
+                echo
+                return 0
+                ;;
+
+
+            creating|"")
+
+                printf \
+                    'Waiting for snapshot... status=%s (%s/%s)\r' \
+                    "${status:-not-visible-yet}" \
+                    "$i" \
+                    "$SNAPSHOT_CHECK_ATTEMPTS"
+
+                sleep "$SNAPSHOT_CHECK_INTERVAL"
+                ;;
+
+
+            *)
+
+                echo
+
+                echo \
+                    "Unexpected snapshot status: ${status}" \
+                    >&2
+
+                return 1
+                ;;
+
+        esac
+
+    done
+
+    echo
+    return 1
+}
+
+
+# ============================================================
+# Determine if server already exists
+# ============================================================
+
+SERVER_ALREADY_EXISTS=false
+
+if server_exists; then
+    SERVER_ALREADY_EXISTS=true
+fi
+
+
+# ============================================================
+# Base snapshot requested while server already exists
+# ============================================================
+
+if [[ "$SERVER_ALREADY_EXISTS" == true ]] && \
+   [[ "$USE_BASE_SNAPSHOT" == true ]]
+then
+
+    die "Base snapshot restore was requested, but server:
+
+  ${SERVER_NAME}
+
+already exists.
+
+The script will NOT replace an existing server automatically.
+
+First finish/delete the existing instance, then run:
+
+  $0 --base
+
+or:
+
+  $0 --base-snapshot ID"
+
+fi
+
+
+# ============================================================
+# START
+# ============================================================
+
+if [[ "$SERVER_ALREADY_EXISTS" == true ]]; then
+
+    log "Server '${SERVER_NAME}' already exists."
+
+    SERVER_STATUS="$(
+        get_server_status || true
+    )"
+
+    [[ -n "$SERVER_STATUS" ]] || \
+        die "Could not determine server status."
+
+
+    log "Current server status: ${SERVER_STATUS}"
+
+
+    if [[ "$SERVER_STATUS" == "off" ]]; then
+
+        log "Existing server is powered off. Starting it."
+
+        if ! hcloud server poweron "$SERVER_NAME"; then
+
+            die "Could not power on existing server."
+
+        fi
+
+    else
+
+        echo
+        echo "Using existing HPB server."
+        echo
+
+    fi
+
+
+else
+
+    # ========================================================
+    # Select source snapshot
+    # ========================================================
+
+    if [[ "$USE_BASE_SNAPSHOT" == true ]]; then
+
+        SNAPSHOT_ID="$(
+            get_base_snapshot_id
+        )"
+
+        SNAPSHOT_SOURCE="BASE"
+
+    else
+
+        SNAPSHOT_ID="$(
+            get_latest_snapshot_id
+        )"
+
+        SNAPSHOT_SOURCE="MANAGED"
+
+
+        if [[ -z "$SNAPSHOT_ID" ]]; then
+
+            die "No managed HPB snapshot found.
+
+Expected a snapshot with labels:
+
+  service=nextcloud-talk-hpb
+  lifecycle=managed
+
+You can alternatively start from the base snapshot using:
+
+  $0 --base"
+
+        fi
+
+    fi
+
+
+    log "Snapshot source: ${SNAPSHOT_SOURCE}"
+    log "Using snapshot: ${SNAPSHOT_ID}"
+
+
+    # ========================================================
+    # Create arguments
+    # ========================================================
+
+    CREATE_ARGS=(
+        server
+        create
+
+        --name
+        "$SERVER_NAME"
+
+        --image
+        "$SNAPSHOT_ID"
+
+        --type
+        "$SERVER_TYPE"
+
+        --location
+        "$LOCATION"
+
+        --primary-ipv4
+        "$PRIMARY_IPV4"
+
+        --primary-ipv6
+        "$PRIMARY_IPV6"
+
+        --ssh-key
+        "$SSH_KEY"
+
+        --label
+        "service=nextcloud-talk-hpb"
+
+        --label
+        "lifecycle=managed"
+    )
+
+
+    if [[ -n "$FIREWALL" ]]; then
+
+        CREATE_ARGS+=(
+            --firewall
+            "$FIREWALL"
+        )
+
+    fi
+
+
+    # ========================================================
+    # Create server
+    # ========================================================
+
+    log "Creating '${SERVER_NAME}'"
+    log "Server type: ${SERVER_TYPE}"
+
+
+    if ! hcloud "${CREATE_ARGS[@]}"; then
+
+        die "Failed to create '${SERVER_NAME}'.
+
+Snapshot:
+
+  ${SNAPSHOT_ID}
+
+Server type:
+
+  ${SERVER_TYPE}
+
+Possible causes:
+
+  - selected server type is unavailable
+  - snapshot disk is too large for selected server type
+  - Primary IPv4 or IPv6 is already assigned
+  - server architecture does not match snapshot
+  - location is incompatible with the Primary IP"
+
+    fi
+
+fi
+
+
+# ============================================================
+# Verify HPB
+# ============================================================
+
+log "Waiting for HPB, Caddy and TLS"
+
+if ! wait_for_hpb; then
+
+    echo >&2
+    echo "HPB health check failed." >&2
+    echo >&2
+    echo "The server will NOT be shut down or deleted." >&2
+    echo >&2
+    echo "Check:" >&2
+    echo >&2
+    echo "  curl -v ${HPB_URL}/api/v1/welcome" >&2
+    echo
+
+    exit 1
+fi
+
+
+log "HPB is ready"
+
+curl -fsS "${HPB_URL}/api/v1/welcome"
+echo
+
+
+# ============================================================
+# Active state
+# ============================================================
+
+if [[ "$SKIP_SNAPSHOT" == true ]]; then
+
+    SHUTDOWN_MODE="KEEP EXISTING MANAGED SNAPSHOT"
+
+else
+
+    SHUTDOWN_MODE="CREATE NEW MANAGED SNAPSHOT"
+
+fi
+
+
+cat <<EOF
+
+============================================================
+ NEXTCLOUD TALK HPB IS RUNNING
+============================================================
+
+URL:
+
+  ${HPB_URL}
+
+Server:
+
+  ${SERVER_NAME}
+
+Server type:
+
+  ${SERVER_TYPE}
+
+Shutdown mode:
+
+  ${SHUTDOWN_MODE}
+
+EOF
+
+
+if [[ "$USE_BASE_SNAPSHOT" == true ]]; then
+
+    cat <<EOF
+Startup source:
+
+  BASE SNAPSHOT
+
+Snapshot:
+
+  ${SNAPSHOT_ID}
+
+EOF
+
+else
+
+    if [[ "${SNAPSHOT_ID:-}" != "" ]]; then
+
+        cat <<EOF
+Startup source:
+
+  MANAGED LIFECYCLE SNAPSHOT
+
+Snapshot:
+
+  ${SNAPSHOT_ID}
+
+EOF
+
+    fi
+
+fi
+
+
+if [[ "$SKIP_SNAPSHOT" == true ]]; then
+
+    CURRENT_MANAGED_SNAPSHOT="$(
+        get_latest_snapshot_id
+    )"
+
+    cat <<EOF
+Existing managed lifecycle snapshot:
+
+  ${CURRENT_MANAGED_SNAPSHOT:-NONE}
+
+Changes made to the current server will NOT be saved.
+
+EOF
+
+fi
+
+
+cat <<EOF
+Press any key to shut down and delete the server.
+
+============================================================
+
+EOF
+
+
+IFS= read -r -n 1 -s
+echo
+
+
+# ============================================================
+# Existing lifecycle snapshot required for skip mode?
+#
+# If we started from BASE, it is perfectly safe to have no
+# managed snapshot at all: the base snapshot itself still
+# exists.
+#
+# If we did NOT start from BASE and skip snapshot is requested,
+# there must be an existing managed snapshot for next startup.
+# ============================================================
+
+if [[ "$SKIP_SNAPSHOT" == true ]]; then
+
+    EXISTING_MANAGED_SNAPSHOT="$(
+        get_latest_snapshot_id
+    )"
+
+
+    if [[ "$USE_BASE_SNAPSHOT" == false ]] && \
+       [[ -z "$EXISTING_MANAGED_SNAPSHOT" ]]
+    then
+
+        die "--skip-snapshot was requested but there is no
+existing managed lifecycle snapshot.
+
+The server will NOT be shut down or deleted."
+
+    fi
+
+
+    if [[ "$USE_BASE_SNAPSHOT" == true ]]; then
+
+        BASE_FOR_RESTORE="$(
+            get_base_snapshot_id
+        )"
+
+        log "Base snapshot remains available: ${BASE_FOR_RESTORE}"
+
+    else
+
+        log "Managed snapshot remains available: ${EXISTING_MANAGED_SNAPSHOT}"
+
+    fi
+
+fi
+
+
+# ============================================================
+# Ensure server still exists
+# ============================================================
+
+if ! server_exists; then
+
+    die "Server '${SERVER_NAME}' disappeared before shutdown."
+
+fi
+
+
+# ============================================================
+# Current server status
+# ============================================================
+
+SERVER_STATUS="$(
+    get_server_status || true
+)"
+
+[[ -n "$SERVER_STATUS" ]] || \
+    die "Could not determine current server status."
+
+
+# ============================================================
+# Graceful shutdown
+# ============================================================
+
+if [[ "$SERVER_STATUS" == "off" ]]; then
+
+    log "Server is already powered off."
+
+else
+
+    log "Gracefully shutting down '${SERVER_NAME}'"
+
+
+    if ! hcloud server shutdown "$SERVER_NAME"; then
+
+        warn "hcloud shutdown returned an error.
+
+The actual server status will now be checked."
+
+    fi
+
+
+    if ! wait_for_server_off; then
+
+        CURRENT_STATUS="$(
+            get_server_status || true
+        )"
+
+        die "Server did not reach status 'off'.
+
+Current status:
+
+  ${CURRENT_STATUS:-unknown}
+
+The server will NOT be deleted."
+
+    fi
+
+fi
+
+
+# ============================================================
+# Verify OFF
+# ============================================================
+
+SERVER_STATUS="$(
+    get_server_status || true
+)"
+
+
+if [[ "$SERVER_STATUS" != "off" ]]; then
+
+    die "Final shutdown verification failed.
+
+Expected:
+
+  off
+
+Actual:
+
+  ${SERVER_STATUS:-unknown}
+
+The server will NOT be deleted."
+
+fi
+
+
+log "Server is powered off."
+
+
+# ============================================================
+# SKIP SNAPSHOT
+# ============================================================
+
+if [[ "$SKIP_SNAPSHOT" == true ]]; then
+
+    log "Skipping snapshot creation."
+
+
+    # ========================================================
+    # Delete server
+    # ========================================================
+
+    log "Deleting '${SERVER_NAME}'"
+
+    if ! hcloud server delete "$SERVER_NAME"; then
+
+        die "Could not delete server.
+
+No new snapshot was requested."
+
+    fi
+
+
+    sleep 2
+
+
+    if server_exists; then
+
+        die "Server still exists after deletion request."
+
+    fi
+
+
+    log "Server deleted successfully"
+
+
+    cat <<EOF
+
+============================================================
+ NEXTCLOUD TALK HPB STOPPED
+============================================================
+
+Server:
+
+  deleted
+
+New snapshot:
+
+  NOT CREATED
+
+EOF
+
+
+    if [[ "$USE_BASE_SNAPSHOT" == true ]]; then
+
+        cat <<EOF
+Base snapshot remains untouched:
+
+  ${BASE_FOR_RESTORE}
+
+To start from the base again:
+
+  $0 --base
+
+EOF
+
+    else
+
+        cat <<EOF
+Managed lifecycle snapshot remains:
+
+  ${EXISTING_MANAGED_SNAPSHOT}
+
+EOF
+
+    fi
+
+
+    cat <<EOF
+============================================================
+
+EOF
+
+    exit 0
+
+fi
+
+
+# ============================================================
+# NORMAL SNAPSHOT MODE
+# ============================================================
+
+GENERATION="$(
+    date -u +%Y%m%dT%H%M%SZ
+)"
+
+SNAPSHOT_DESCRIPTION="nextcloud-talk-hpb-${GENERATION}"
+
+
+# ============================================================
+# Create lifecycle snapshot
+# ============================================================
+
+log "Creating snapshot '${SNAPSHOT_DESCRIPTION}'"
+
+if ! hcloud server create-image \
+    --type snapshot \
+    --description "$SNAPSHOT_DESCRIPTION" \
+    --label "service=nextcloud-talk-hpb" \
+    --label "lifecycle=managed" \
+    --label "generation=${GENERATION}" \
+    "$SERVER_NAME"
+then
+
+    die "Snapshot creation failed.
+
+The server still exists and is powered off.
+It was NOT deleted."
+
+fi
+
+
+# ============================================================
+# Wait for snapshot
+# ============================================================
+
+log "Waiting for snapshot to become available"
+
+if ! wait_for_snapshot "$GENERATION"; then
+
+    die "Snapshot did not become available.
+
+The server still exists and was NOT deleted."
+
+fi
+
+
+# ============================================================
+# Determine new snapshot
+# ============================================================
+
+NEW_SNAPSHOT_ID="$(
+    hcloud image list \
+        --type snapshot \
+        --selector \
+            "${SNAPSHOT_SELECTOR},generation=${GENERATION}" \
+        -o noheader \
+        -o columns=id,status \
+    | awk '$2 == "available" {print $1; exit}'
+)"
+
+
+if [[ -z "$NEW_SNAPSHOT_ID" ]]; then
+
+    die "Could not determine the new snapshot ID.
+
+The server still exists and was NOT deleted."
+
+fi
+
+
+log "New snapshot is available: ${NEW_SNAPSHOT_ID}"
+
+
+# ============================================================
+# Verify new snapshot
+# ============================================================
+
+NEW_SNAPSHOT_STATUS="$(
+    hcloud image describe \
+        "$NEW_SNAPSHOT_ID" \
+        -o format='{{.Status}}' \
+        2>/dev/null \
+        || true
+)"
+
+
+if [[ "$NEW_SNAPSHOT_STATUS" != "available" ]]; then
+
+    die "New snapshot verification failed.
+
+Snapshot:
+
+  ${NEW_SNAPSHOT_ID}
+
+Status:
+
+  ${NEW_SNAPSHOT_STATUS:-unknown}
+
+The server still exists and was NOT deleted."
+
+fi
+
+
+# ============================================================
+# Delete server
+# ============================================================
+
+log "Deleting '${SERVER_NAME}'"
+
+if ! hcloud server delete "$SERVER_NAME"; then
+
+    die "Could not delete server.
+
+The new snapshot is already safe:
+
+  ${NEW_SNAPSHOT_ID}"
+
+fi
+
+
+sleep 2
+
+
+if server_exists; then
+
+    die "Server still exists after deletion request.
+
+The new snapshot is safe:
+
+  ${NEW_SNAPSHOT_ID}"
+
+fi
+
+
+log "Server deleted successfully"
+
+
+# ============================================================
+# Delete obsolete MANAGED lifecycle snapshots
+#
+# Base snapshots are never touched because they do not have:
+#
+# lifecycle=managed
+# ============================================================
+
+log "Removing obsolete managed HPB lifecycle snapshots"
+
+
+while read -r OLD_SNAPSHOT_ID; do
+
+    [[ -n "$OLD_SNAPSHOT_ID" ]] || continue
+
+    [[ "$OLD_SNAPSHOT_ID" == "$NEW_SNAPSHOT_ID" ]] && continue
+
+
+    echo "Deleting obsolete managed snapshot ${OLD_SNAPSHOT_ID}"
+
+
+    if ! hcloud image delete "$OLD_SNAPSHOT_ID"; then
+
+        warn "Could not delete old managed snapshot:
+
+  ${OLD_SNAPSHOT_ID}
+
+The new snapshot remains valid."
+
+    fi
+
+done < <(
+
+    hcloud image list \
+        --type snapshot \
+        --selector "$SNAPSHOT_SELECTOR" \
+        -o noheader \
+        -o columns=id
+
+)
+
+
+# ============================================================
+# Final verification
+# ============================================================
+
+LATEST_SNAPSHOT_ID="$(
+    get_latest_snapshot_id
+)"
+
+
+if [[ "$LATEST_SNAPSHOT_ID" != "$NEW_SNAPSHOT_ID" ]]; then
+
+    die "Unexpected lifecycle state after cleanup.
+
+Expected:
+
+  ${NEW_SNAPSHOT_ID}
+
+Detected:
+
+  ${LATEST_SNAPSHOT_ID:-none}"
+
+fi
+
+
+# ============================================================
+# Done
+# ============================================================
+
+cat <<EOF
+
+============================================================
+ NEXTCLOUD TALK HPB STOPPED
+============================================================
+
+Server:
+
+  deleted
+
+Current managed lifecycle snapshot:
+
+  ${NEW_SNAPSHOT_ID}
+
+Snapshot description:
+
+  ${SNAPSHOT_DESCRIPTION}
+
+Snapshot labels:
+
+  service=nextcloud-talk-hpb
+  lifecycle=managed
+  generation=${GENERATION}
+
+Base snapshot:
+
+  untouched
+
+============================================================
+
+EOF
+

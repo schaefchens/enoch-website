@@ -1,1 +1,10 @@
 .env
+.env.*
+!.env.example
+/var/*
+!/var/.gitkeep
+/vendor/
+/dist/
+*.pyc
+__pycache__/
+.DS_Store

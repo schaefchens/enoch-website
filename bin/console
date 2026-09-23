@@ -1,0 +1,54 @@
+#!/usr/bin/env php
+<?php
+// All passwords come from stdin, never command arguments.
+declare(strict_types=1);
+require dirname(__DIR__).'/app/bootstrap.php';
+function updateEnv(string $file,array $values):void {
+    $text=is_file($file)?file_get_contents($file):'';
+    foreach($values as $key=>$value){if(preg_match('/^'.preg_quote($key,'/').'=/m',$text))$text=preg_replace('/^'.preg_quote($key,'/').'=.*$/m',$key.'='.$value,$text);else $text=rtrim($text)."\n".$key.'='.$value."\n";}
+    file_put_contents($file,$text,LOCK_EX);chmod($file,0600);
+}
+function passwordInput():string{
+    if(function_exists('stream_isatty')&&stream_isatty(STDIN))throw new RuntimeException('Read the password from stdin; it is never accepted as an argument.');
+    $pw=rtrim(stream_get_contents(STDIN),"\r\n");if(strlen($pw)<12||strlen($pw)>72)throw new RuntimeException('Use 12–72 bytes.');return $pw;
+}
+try{
+    switch($argv[1]??'help'){
+    case 'init':
+        $updates=[];foreach(['SETUP_KEY','CRON_KEY'] as $key)if(strlen($config->get($key))<32)$updates[$key]=bin2hex(random_bytes(32));
+        if($config->get('APP_URL')==='')$updates['APP_URL']='https://enoch.schaefchens.de';
+        if($updates)updateEnv($config->root.'/.env',$updates);
+        echo "Private configuration initialized. Read SETUP_KEY from .env to create the first administrator in the browser.\n";break;
+    case 'ssh-key':
+        $dir=$config->dataDir.'/ssh';if(!is_dir($dir))mkdir($dir,0700,true);
+        if(is_file($dir.'/enoch'))throw new RuntimeException('The portal SSH key already exists. It was not overwritten.');
+        $key=phpseclib3\Crypt\EC::createKey('Ed25519');
+        file_put_contents($dir.'/enoch',$key->toString('OpenSSH'));chmod($dir.'/enoch',0600);
+        file_put_contents($dir.'/enoch.pub',$key->getPublicKey()->toString('OpenSSH')."\n");
+        echo "Created dedicated SSH key in var/ssh. Install only its public key on the Nextcloud VM with infrastructure/server/enoch-agent-install.sh.\n";break;
+    case 'doctor':
+        foreach(['curl','pdo_sqlite','mbstring','openssl'] as $ext)echo $ext.': '.(extension_loaded($ext)?'OK':'MISSING')."\n";
+        foreach(['HETZNER_CLOUD_TOKEN','CRON_KEY','NEXTCLOUD_SSH_FINGERPRINT','GAME_SERVER_ADMIN_KEY'] as $key)echo $key.': '.($config->get($key)!==''?'configured':'missing')."\n";
+        echo 'Private data: '.(is_writable($config->dataDir)?'writable':'NOT writable')."\n";
+        echo 'Nextcloud SSH key: '.(is_file($config->dataDir.'/ssh/enoch')?'present':'missing')."\n";break;
+    case 'status':echo json_encode($engine->dashboard(),JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n";break;
+    case 'probe':
+        $server=$cloud->server($config->services['nextcloud'])??throw new RuntimeException('Nextcloud is not allocated.');
+        echo json_encode($host->command($server,'probe'))."\n";break;
+    case 'worker':
+        $store->set('cron_seen',time());$scheduler=new Enoch\Scheduler($config,$store);$result=$scheduler->runDue();
+        if(($result['due']??null)===false)$result=$engine->tick();echo json_encode($result)."\n";break;
+    case 'start':case 'stop':echo 'Queued '.$engine->enqueue($argv[2]??'',$argv[1],'local-cli')."\n";break;
+    case 'user:add':$auth->addUser($argv[2]??'',passwordInput(),$argv[3]??'operator');echo "Account created.\n";break;
+    case 'user:enable':$store->query('UPDATE users SET active=1,version=version+1 WHERE name=?',[$argv[2]??'']);echo "Account enabled if found.\n";break;
+    case 'user:reset':
+        $store->query('UPDATE users SET password=?,active=1,version=version+1 WHERE name=?',[password_hash(passwordInput(),defined('PASSWORD_ARGON2ID')?PASSWORD_ARGON2ID:PASSWORD_DEFAULT),$argv[2]??'']);echo "Password reset if account exists.\n";break;
+    case 'cron-command':
+        $key=$config->get('CRON_KEY');if(strlen($key)<32)throw new RuntimeException('Run init first.');
+        $url=rtrim($config->get('APP_URL'),'/').'/cron.php';
+        $line='* * * * * /usr/bin/curl --silent --show-error --connect-timeout 2 --max-time 5 --request POST --header '.escapeshellarg('Authorization: Bearer '.$key).' '.escapeshellarg($url)."\n";
+        file_put_contents($config->dataDir.'/cron-command.txt',$line);chmod($config->dataDir.'/cron-command.txt',0600);
+        echo "Wrote private var/cron-command.txt. The curl caller is limited to five seconds.\n";break;
+    default:echo "Enoch console\n  init              Generate private setup and cron keys\n  ssh-key           Generate a restricted portal SSH key\n  doctor            Check local requirements\n  status            Read Hetzner server status\n  probe             Check the installed Nextcloud agent\n  worker            Advance one bounded unit of work\n  start|stop ID     Queue a lifecycle job\n  user:add NAME ROLE   Read password from stdin\n  user:reset NAME      Read replacement password from stdin\n  user:enable NAME     Restore access\n  cron-command      Save the private, five-second cron command\n";
+    }
+}catch(Throwable $e){fwrite(STDERR,$e->getMessage()."\n");exit(1);}

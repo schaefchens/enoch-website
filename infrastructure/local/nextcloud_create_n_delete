@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""Run locally: manage the wolke2 VM through hcloud and its existing SSH key."""
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import uuid
+
+SERVER_NAME = "wolke2"
+DOMAIN = "wolke2.schaefchens.de"
+LOCATION = "fsn1"
+PRIMARY_IPV4 = 150948650
+PRIMARY_IPV6 = 150948651
+SSH_KEY_NAME = "abraham@der-weg-des-herrn.de"
+SSH_KEY_FILE = Path("~/.ssh/hetzner_abraham").expanduser()
+FIREWALL = "firewall-nextcloud-wolke2"
+SELECTOR = "service=nextcloud-aio,instance=wolke2,lifecycle=managed"
+BASE_SELECTOR = "service=nextcloud-aio,instance=wolke2,lifecycle=base"
+HPB_NAME = "hpb.schaefchens.de"
+
+
+class LifecycleError(Exception):
+    pass
+
+
+def log(message):
+    print("==> " + message, flush=True)
+
+
+def run(args, *, timeout=1800, capture=False):
+    result = subprocess.run(args, text=True, capture_output=capture, timeout=timeout)
+    if result.returncode:
+        detail = result.stderr.strip() if capture else "See the command output above."
+        raise LifecycleError(f"Command failed: {shlex.join(args)}\n{detail}")
+    return result.stdout if capture else None
+
+
+def cloud(*args):
+    # Retry reads only. An ambiguous create/delete must never be replayed blindly.
+    last = None
+    for attempt in range(3):
+        try:
+            return json.loads(run(["hcloud", *map(str, args), "-o", "json"], timeout=60, capture=True))
+        except (LifecycleError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+            last = exc
+            if attempt != 2:
+                time.sleep(2)
+    raise LifecycleError(f"Could not read Hetzner state reliably: {last}")
+
+
+def mutate(*args):
+    return run(["hcloud", *map(str, args)])
+
+
+def snapshots(selector):
+    images = cloud("image", "list", "--type", "snapshot", "--selector", selector)
+    return sorted((i for i in images if i["status"] == "available"), key=lambda i: i["created"], reverse=True)
+
+
+def ip_matches(server, ipv4, ipv6):
+    public = server.get("public_net", {})
+    return (public.get("ipv4") or {}).get("id") == ipv4 and (public.get("ipv6") or {}).get("id") == ipv6
+
+
+def find_server(name=SERVER_NAME, ipv4=PRIMARY_IPV4, ipv6=PRIMARY_IPV6):
+    servers = cloud("server", "list")
+    candidates = [s for s in servers if s["name"] in (name, DOMAIN if name == SERVER_NAME else name) or ip_matches(s, ipv4, ipv6)]
+    if len(candidates) > 1:
+        raise LifecycleError("Multiple matching VMs; refusing an ambiguous action.")
+    if candidates and not ip_matches(candidates[0], ipv4, ipv6):
+        raise LifecycleError("Server name matches but its persistent IPs do not; refusing to alter it.")
+    return candidates[0] if candidates else None
+
+
+def check_ips(ipv4, ipv6, server=None):
+    for ident in (ipv4, ipv6):
+        ip = cloud("primary-ip", "describe", ident)
+        if ip.get("auto_delete"):
+            raise LifecycleError(f"Primary IP {ident} has auto_delete enabled; disable it before proceeding.")
+        if ip.get("assignee_id") not in (None, server["id"] if server else None):
+            raise LifecycleError(f"Primary IP {ident} belongs to another VM.")
+        if (ip.get("location") or {}).get("name") != LOCATION:
+            raise LifecycleError(f"Primary IP {ident} is not in {LOCATION}.")
+
+
+def validate_image(image, server_type):
+    if image["status"] != "available" or image["type"] != "snapshot":
+        raise LifecycleError("The selected snapshot is not available.")
+    if image["architecture"] != server_type["architecture"]:
+        raise LifecycleError("Snapshot architecture does not match the requested VM type.")
+    if image["disk_size"] > server_type["disk"]:
+        raise LifecycleError("The snapshot requires a larger disk. Select a suitable --type.")
+
+
+def check_type(name, image=None):
+    server_type = cloud("server-type", "describe", name)
+    available = any(loc["name"] == LOCATION and loc.get("available") for loc in server_type.get("locations", []))
+    if not available:
+        raise LifecycleError(f"{name} currently has no capacity in {LOCATION}. Retry later or specify --type. No resources were deleted.")
+    if image:
+        validate_image(image, server_type)
+    return server_type
+
+
+def wait_status(ident, expected, timeout=1800):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        server = cloud("server", "describe", ident)
+        if server["status"] == expected:
+            return server
+        time.sleep(3)
+    raise LifecycleError(f"VM {ident} did not reach {expected}. It has not been deleted.")
+
+
+def endpoint_ready(url, kind):
+    try:
+        with urllib.request.urlopen(url, timeout=8) as response:
+            body = json.load(response)
+        if kind == "nextcloud":
+            return body.get("installed") and not body.get("maintenance") and not body.get("needsDbUpgrade")
+        return body.get("nextcloud-spreed-signaling") == "Welcome"
+    except (OSError, ValueError):
+        return False
+
+
+def wait_ready(url, kind, timeout=1200):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if endpoint_ready(url, kind):
+            return
+        time.sleep(3)
+    raise LifecycleError(f"Readiness check failed: {url}. The VM is left intact for inspection.")
+
+
+def ensure_firewall(dry_run=False):
+    rules = [
+        {"direction": "in", "source_ips": ["0.0.0.0/0", "::/0"], "protocol": proto,
+         **({"port": port} if port else {}), "description": desc}
+        for proto, port, desc in [("tcp", "22", "SSH"), ("tcp", "80", "AIO HTTP / ACME"),
+                                  ("tcp", "443", "Nextcloud HTTPS"), ("udp", "443", "HTTP/3"),
+                                  ("tcp", "3478", "Optional internal Talk TURN"), ("udp", "3478", "Optional internal Talk TURN"),
+                                  ("icmp", None, "ICMP and IPv6 path discovery")]
+    ]
+    existing = [f for f in cloud("firewall", "list") if f["name"] == FIREWALL]
+    if existing:
+        actual = existing[0]["rules"]
+        for expected in rules:
+            if not any(r["direction"] == "in" and r["protocol"] == expected["protocol"]
+                       and r.get("port") == expected.get("port")
+                       and set(r.get("source_ips", [])) >= set(expected["source_ips"]) for r in actual):
+                raise LifecycleError(f"Existing firewall {FIREWALL} is missing a required rule; inspect it before continuing.")
+        return
+    if dry_run:
+        log(f"Would create {FIREWALL}: TCP 22/80/443/3478, UDP 443/3478, ICMP for IPv4 and IPv6.")
+        return
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as handle:
+        json.dump(rules, handle)
+        handle.flush()
+        mutate("firewall", "create", "--name", FIREWALL, "--rules-file", handle.name)
+
+
+def select_image(args):
+    if args.base_snapshot:
+        return cloud("image", "describe", args.base_snapshot)
+    candidates = snapshots(BASE_SELECTOR if args.base else SELECTOR)
+    if not candidates and not args.base:
+        candidates = snapshots(BASE_SELECTOR)
+    if not candidates:
+        raise LifecycleError("No suitable Nextcloud snapshot. Use --fresh for the initial VM, or --base-snapshot ID.")
+    return candidates[0]
+
+
+def start(args):
+    server = find_server()
+    check_ips(PRIMARY_IPV4, PRIMARY_IPV6, server)
+    if server and (args.base or args.base_snapshot or args.fresh):
+        raise LifecycleError("A VM already exists; --fresh/--base cannot replace it automatically.")
+    image = None
+    if server is None:
+        image = None if args.fresh else select_image(args)
+        check_type(args.type, image)
+    ensure_firewall(args.dry_run)
+    if server is None:
+        image_id = "ubuntu-24.04" if args.fresh else image["id"]
+        log(f"{'Would create' if args.dry_run else 'Creating'} {SERVER_NAME}, type {args.type}, image {image_id}.")
+        if args.dry_run:
+            return
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml") as config:
+            config.write("#cloud-config\nhostname: wolke2\nfqdn: wolke2\npreserve_hostname: false\nmanage_etc_hosts: true\nssh_deletekeys: false\n")
+            config.flush()
+            mutate("server", "create", "--name", SERVER_NAME, "--image", image_id, "--type", args.type,
+                   "--location", LOCATION, "--primary-ipv4", PRIMARY_IPV4, "--primary-ipv6", PRIMARY_IPV6,
+                   "--ssh-key", SSH_KEY_NAME, "--firewall", FIREWALL,
+                   "--label", "service=nextcloud-aio", "--label", "instance=wolke2", "--label", "lifecycle=managed",
+                   "--user-data-from-file", config.name)
+        server = find_server()
+        if not server:
+            raise LifecycleError("Creation returned but no matching server was found; inspect Hetzner state.")
+    elif args.dry_run:
+        log(f"Would use existing VM {server['id']} ({server['status']}).")
+        return
+    elif server["status"] == "off":
+        mutate("server", "poweron", server["id"])
+    elif server["status"] != "running":
+        raise LifecycleError("VM is in a transitional state; retry after its current action finishes.")
+    # A pre-existing VM may not yet have this dedicated firewall attached.
+    firewalls = cloud("firewall", "list")
+    firewall = next(f for f in firewalls if f["name"] == FIREWALL)
+    if firewall["id"] not in [f["id"] for f in server["public_net"].get("firewalls", [])]:
+        mutate("firewall", "apply-to-resource", FIREWALL, "--type", "server", "--server", server["id"])
+    if args.fresh:
+        log(f"Fresh Ubuntu VM is running. Copy nextcloud_server_setup.sh to root@{DOMAIN} and run it there.")
+        return
+    log("Waiting for Nextcloud and AIO startup...")
+    wait_ready(f"https://{DOMAIN}/status.php", "nextcloud")
+    log(f"Nextcloud is ready: https://{DOMAIN}")
+
+
+def ssh(*remote_args):
+    return run(["ssh", "-i", str(SSH_KEY_FILE), "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                "-o", "StrictHostKeyChecking=yes", f"root@{DOMAIN}", shlex.join(remote_args)], timeout=1500)
+
+
+def stop(args):
+    server = find_server()
+    if not server:
+        log("Nextcloud VM is already absent.")
+        return
+    ident = server["id"]
+    check_ips(PRIMARY_IPV4, PRIMARY_IPV6, server)
+    fallback = select_image(args) if args.skip_snapshot else None
+    if args.dry_run:
+        log(f"Would cleanly stop AIO on VM {ident}, power it off, and {'preserve snapshot '+str(fallback['id']) if fallback else 'create and verify a new snapshot'}.")
+        log("Would keep the VM powered off." if args.keep_server else "Would delete only this VM, keeping both Primary IPs.")
+        return
+    if server["status"] == "running":
+        log("Cleanly stopping Nextcloud, PostgreSQL and the other AIO containers...")
+        ssh("/usr/local/sbin/nextcloud-aio-stop-siblings")
+        # Verify separately; no hard poweroff fallback is used.
+        ssh("bash", "-c", "test -z \"$(docker ps --format '{{.Names}}' | grep '^nextcloud-aio-' | grep -Ev '^nextcloud-aio-(mastercontainer|domaincheck)$')\"")
+        mutate("server", "shutdown", ident)
+        wait_status(ident, "off")
+    elif server["status"] != "off":
+        raise LifecycleError("VM is not running or off. Nothing was deleted.")
+    if cloud("server", "describe", ident)["status"] != "off":
+        raise LifecycleError("VM is not powered off; refusing snapshot/deletion.")
+    new_snapshot = None
+    if not args.skip_snapshot:
+        generation = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+        log("Creating a snapshot of the powered-off VM...")
+        mutate("server", "create-image", ident, "--type", "snapshot", "--description", f"nextcloud-wolke2-{generation}",
+               "--label", "service=nextcloud-aio", "--label", "instance=wolke2", "--label", "lifecycle=managed",
+               "--label", f"generation={generation}")
+        images = snapshots(SELECTOR + ",generation=" + generation)
+        if len(images) != 1:
+            raise LifecycleError("The new snapshot could not be verified. The powered-off VM has been kept.")
+        new_snapshot = cloud("image", "describe", images[0]["id"])
+        if new_snapshot["status"] != "available" or (new_snapshot.get("created_from") or {}).get("id") != ident:
+            raise LifecycleError("Snapshot origin/status verification failed. The VM has been kept.")
+        log(f"Verified snapshot {new_snapshot['id']}.")
+    else:
+        # Re-check the fallback immediately before any deletion.
+        if cloud("image", "describe", fallback["id"])["status"] != "available":
+            raise LifecycleError("The fallback snapshot is no longer available. The VM has been kept.")
+    current = find_server()
+    if not current or current["id"] != ident or current["status"] != "off":
+        raise LifecycleError("Server identity or state changed. Refusing deletion.")
+    check_ips(PRIMARY_IPV4, PRIMARY_IPV6, current)
+    if args.keep_server:
+        log("Snapshot complete; VM retained and powered off (--keep-server).")
+    else:
+        mutate("server", "delete", ident)
+        if find_server():
+            raise LifecycleError("The VM still exists; inspect Hetzner state. Snapshot is safe.")
+        check_ips(PRIMARY_IPV4, PRIMARY_IPV6)
+        log("VM deleted. Both persistent IPs and the verified snapshot are retained.")
+    if new_snapshot:
+        # Never touch base snapshots, HPB snapshots, or another instance's images.
+        for old in snapshots(SELECTOR)[args.retain:]:
+            if old["id"] != new_snapshot["id"]:
+                mutate("image", "delete", old["id"])
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", nargs="?", choices=["run", "start", "stop", "status"], default="run")
+    parser.add_argument("-t", "--type", default="cx23", help="New VM type (default: cx23, 4 GB / 40 GB)")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("-b", "--base", action="store_true", help="Restore the newest base-labelled snapshot")
+    source.add_argument("--base-snapshot", help="Restore this explicit snapshot ID")
+    source.add_argument("--fresh", action="store_true", help="Create Ubuntu 24.04 for the initial installation")
+    parser.add_argument("-S", "--skip-snapshot", action="store_true", help="Discard changes; requires an available restore snapshot")
+    parser.add_argument("--keep-server", action="store_true", help="Snapshot and power off, retaining the VM capacity")
+    parser.add_argument("--retain", type=int, default=2, help="Managed Nextcloud snapshots to retain (default: 2)")
+    parser.add_argument("--dry-run", action="store_true", help="Read and validate cloud state without changes")
+    args = parser.parse_args(argv)
+    if args.retain < 1:
+        parser.error("--retain must be at least 1")
+    if args.fresh and args.action not in ("run", "start"):
+        parser.error("--fresh is a startup option")
+    if args.action == "status":
+        server = find_server()
+        print(json.dumps({"server": {k: server[k] for k in ("id", "name", "status")} if server else None,
+                          "snapshots": [{k:i[k] for k in ("id", "description", "created")} for i in snapshots(SELECTOR)],
+                          "nextcloud_ready": endpoint_ready(f"https://{DOMAIN}/status.php", "nextcloud"),
+                          "hpb_ready": endpoint_ready(f"https://{HPB_NAME}/api/v1/welcome", "hpb")}, indent=2))
+        return
+    lock_path = Path(tempfile.gettempdir()) / f"nextcloud-wolke2-{os.getuid()}.lock"
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise LifecycleError("Another Nextcloud lifecycle command is already running.")
+        if args.action in ("run", "start"):
+            start(args)
+        if args.action == "run" and not args.dry_run and not args.fresh:
+            if not sys.stdin.isatty():
+                raise LifecycleError("Interactive mode requires a terminal. VM remains running; use explicit start/stop commands.")
+            input("\nNextcloud is running. Press Enter to cleanly stop, snapshot and delete it (Ctrl-C leaves it running). ")
+        if args.action == "stop" or (args.action == "run" and not args.fresh):
+            stop(args)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted. No automatic cleanup was attempted; inspect status before continuing.", file=sys.stderr)
+        sys.exit(130)
+    except (LifecycleError, OSError, subprocess.TimeoutExpired) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)

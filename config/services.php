@@ -1,0 +1,23 @@
+<?php
+declare(strict_types=1);
+
+// A service owns these exact Primary IPs. Names alone never authorize an action.
+// Add more snapshot-backed servers here. Scheduled HTTP tasks live in tasks.php.
+return [
+    'nextcloud' => [
+        'title' => 'Nextcloud', 'subtitle' => 'Files, Office & Talk', 'domain' => 'wolke2.schaefchens.de',
+        'description' => 'Your shared workspace, with local Collabora and a choice of internal or external Talk.',
+        'name' => 'wolke2', 'aliases' => ['wolke2.schaefchens.de'], 'location' => 'fsn1', 'type' => 'cx23',
+        'ipv4' => 150948650, 'ipv6' => 150948651, 'firewall' => 11663891, 'ssh_keys' => [100740697],
+        'labels' => ['service' => 'nextcloud-aio', 'instance' => 'wolke2', 'lifecycle' => 'managed'],
+        'prepare' => 'aio', 'ready_url' => 'https://wolke2.schaefchens.de/status.php', 'ready_kind' => 'nextcloud',
+    ],
+    'hpb' => [
+        'title' => 'Talk backend', 'subtitle' => 'Shared signaling & calls', 'domain' => 'hpb.schaefchens.de',
+        'description' => 'Shared by wolke and wolke2. Start and stop it independently of Nextcloud.',
+        'name' => 'hpb', 'aliases' => ['hpb.schaefchens.de'], 'location' => 'fsn1', 'type' => 'cpx12',
+        'ipv4' => 97117715, 'ipv6' => 97117717, 'firewall' => 11602103, 'ssh_keys' => [100740697],
+        'labels' => ['service' => 'nextcloud-talk-hpb', 'lifecycle' => 'managed'],
+        'prepare' => null, 'ready_url' => 'https://hpb.schaefchens.de/spreed/api/v1/welcome', 'ready_kind' => 'hpb',
+    ],
+];
