@@ -52,8 +52,8 @@ or TURN TCP connections. The VM sends a short authenticated heartbeat to
 sent or stored.
 
 Enoch checks the cloud inventory at most every five minutes. A running Nextcloud
-VM with no heartbeat for 30 minutes, or an HPB VM quiet for 15 minutes, receives
-the ordinary durable stop request. The same clean shutdown, snapshot verification,
+or HPB VM with no heartbeat for 30 minutes receives the ordinary durable stop
+request. The services remain independently controlled. The same clean shutdown, snapshot verification,
 checkpoint retention and persistent-IP checks apply. A VM started with snapshot
 saving disabled is stopped with that existing discard policy, leaving the prior
 current snapshot intact. A completed portal start resets the quiet-period grace

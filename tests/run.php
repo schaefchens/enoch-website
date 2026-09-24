@@ -133,6 +133,7 @@ try{
     [$as,$ac,$ah,$ae]=fixture();$ac->seed();$ac->servers[0]['created']=gmdate('c',time()-4000);$as->set('activity:nextcloud',['last_seen'=>time()-4000]);
     (new ActivityMonitor($config,$as,$ac,$ae))->runDue();$automatic=$as->query("SELECT * FROM jobs WHERE status='active'")->fetch();
     check($automatic&&$automatic['operation']==='stop'&&$automatic['actor']==='automatic inactivity monitor','quiet running service queues the ordinary safe stop workflow');
+    check($config->services['nextcloud']['idle_timeout']===$config->services['hpb']['idle_timeout'],'Nextcloud and HPB use the same inactivity interval');
     [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];$e->enqueue('nextcloud','stop','alice');for($n=0;$n<15;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&array_column($c->images,'id')===[21],'verified new snapshot replaces previous current snapshot');
     check(!array_filter($c->calls,fn($a)=>$a[0]==='DELETE'&&$a[1]==='/images/'.$c->cfg['initial_image']),'protected initial is never pruned');

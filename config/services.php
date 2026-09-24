@@ -31,6 +31,6 @@ return [
         'ipv4' => 97117715, 'ipv6' => 97117717, 'firewall' => 11602103, 'ssh_keys' => [100740697],
         'labels' => ['service' => 'nextcloud-talk-hpb', 'lifecycle' => 'managed'],
         'prepare' => null, 'ready_url' => 'https://hpb.schaefchens.de/api/v1/welcome', 'ready_kind' => 'hpb',
-        'activity_kind' => 'hpb', 'idle_timeout' => 900,
+        'activity_kind' => 'hpb', 'idle_timeout' => 1800,
     ],
 ];
