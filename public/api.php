@@ -15,7 +15,9 @@ try{
             $auth->access->requireOperation($user,$service,$operation);
             $options=$input['options']??[];
             if(!is_array($options))throw new RuntimeException('Invalid lifecycle options.');
-            if(array_diff(array_keys($options),['acknowledge_discard','acknowledge_large_disk']))$auth->access->requireOperation($user,$service,'advanced');
+            $advanced=array_diff(array_keys($options),['save_snapshot','acknowledge_discard','acknowledge_large_disk']);
+            if($advanced)$auth->access->requireOperation($user,$service,'advanced');
+            if(array_key_exists('save_snapshot',$options)&&$user['ui_mode']!=='technical'&&$user['role']!=='admin')$auth->access->requireOperation($user,$service,'advanced');
             $id=$engine->enqueue($service,$operation,$user['name'],$options);Web::json(['id'=>$id],202);
         }
         if(in_array($action,['credentials','save-credentials'],true)){

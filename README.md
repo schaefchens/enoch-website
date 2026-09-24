@@ -144,6 +144,12 @@ service rights during the one-time migration, but gain no credential/advanced
 rights. Administrators always have full access. Permission edits invalidate the
 member's existing session. Already queued work can still finish.
 
+A technical-mode operator with stop permission can choose whether to save the
+running session or stop it without a new snapshot. Discarding requires an explicit
+confirmation and retains the previous current, initial and protected checkpoint
+snapshots. Restore source, server size and checkpoint creation still require the
+separate advanced permission.
+
 German and English default from `Accept-Language`; language and appearance can be
 changed on both the login page and inside the portal. Appearance follows the OS
 unless explicitly selected. Catalogs are in `config/locales`; translations use

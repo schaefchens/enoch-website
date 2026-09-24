@@ -21,7 +21,7 @@ $user=$auth->user();
 $technical=$user&&($user['ui_mode']==='technical'||$user['role']==='admin');
 $admin=$user&&$user['role']==='admin';
 $e=Web::escape(...);
-$version='20260924-activity-1';
+$version='20260924-discard-1';
 $i18n=new Enoch\I18n($config);$tr=$i18n->text(...);$t=static fn(string $text)=>Web::escape($tr($text));
 $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View only'];
 ?>

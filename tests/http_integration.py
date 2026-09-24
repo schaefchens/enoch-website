@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   token=re.search(rb'name="csrf-token" content="([^"]+)"',body).group(1).decode()
   assert post('job',{'service':'nextcloud','operation':'stop'},'wrong')[0]==400
   assert post('user',{'name':'testviewer','password':'a-viewer-test-password','role':'viewer'},token)[0]==200
+  assert post('user',{'name':'testtech','password':'a-technical-test-password','role':'operator','ui_mode':'technical','permissions':{'nextcloud':{'view':True,'stop':True}}},token)[0]==200
   assert post('job',{'service':'unknown','operation':'stop'},token)[0]==400
   assert post('cron-command',{},token)[0]==200
   assert post('save-credentials',{'service':'hpb','values':{'wolke_secret':'hidden-test-signaling'}},token)[0]==200
@@ -65,6 +66,12 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   assert result['tasks'][0]['state']['status']=='ok'
   assert all(s['state']=='unknown' for s in result['services'])
   assert 'a'*64 not in body.decode() and 'b'*64 not in body.decode()
+  request('/',urllib.parse.urlencode(dict(csrf=token,action='logout')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
+  status,body,_=request('/');token=re.search(rb'name="csrf" value="([^"]+)"',body).group(1).decode()
+  status,body,_=request('/',urllib.parse.urlencode(dict(csrf=token,name='testtech',password='a-technical-test-password')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
+  token=re.search(rb'name="csrf-token" content="([^"]+)"',body).group(1).decode()
+  assert post('job',{'service':'nextcloud','operation':'stop','options':{'save_snapshot':False,'acknowledge_discard':True}},token)[0]==202
+  assert post('job',{'service':'nextcloud','operation':'stop','options':{'checkpoint_name':'Forbidden checkpoint'}},token)[0]==403
   request('/',urllib.parse.urlencode(dict(csrf=token,action='logout')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
   status,body,_=request('/');token=re.search(rb'name="csrf" value="([^"]+)"',body).group(1).decode()
   status,body,_=request('/',urllib.parse.urlencode(dict(csrf=token,name='testviewer',password='a-viewer-test-password')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
