@@ -85,6 +85,8 @@ A hard delete of an unsnapshotted VM loses its changes after the last snapshot. 
 - `infrastructure/local/`: the existing Mac lifecycle scripts and a wrapper that loads this project's `.env`.
 - `docs/nextcloud.md`: detailed Nextcloud installation, local Collabora, external/internal Talk and snapshot workflow.
 - `bin/deploy.py`: SFTP deployment to this account's `/` web root. It checks that private files are denied over HTTPS **before uploading credentials**.
+- `bin/import-nextcloud-users.py`: validates and imports the private TSV through
+  Nextcloud's own commands without placing passwords in arguments or logs.
 
 The existing `/usr/local/bin` scripts are preserved. Run from this repository:
 

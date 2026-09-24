@@ -109,6 +109,32 @@ sudo journalctl -u nextcloud-aio-external-talk.service -n 30 --no-pager
 
 Collabora remains local in both modes.
 
+## Import the prepared accounts
+
+The private, Git-ignored import file is
+`var/imports/wolke-nextcloud-users.tsv`. Its columns cover username, new
+password, display name, email, semicolon-separated groups, groups administered by
+the user, quota and manager. Validate it without contacting the server:
+
+```bash
+python3 bin/import-nextcloud-users.py --validate-only
+```
+
+With Nextcloud running and healthy, import it with:
+
+```bash
+python3 bin/import-nextcloud-users.py
+```
+
+The importer is safe to resume after interruption. New accounts are created and
+existing listed accounts are updated to the file's intended password and profile.
+Passwords are sent through SSH standard input and process environment, never as
+command arguments or output. The importer uses Nextcloud's `occ` commands for
+accounts, groups, quotas and managers. Group-admin assignments use Nextcloud's
+service API inside the application container; the database is not edited
+directly. It verifies all listed accounts, memberships, quotas and sub-admin
+assignments before reporting success.
+
 ## HPB changes
 
 Run `highperformancebackend_server_setup.sh` **on the HPB Ubuntu VM**, not on the Mac. It keeps the installed HPB image and original `wolke` and TURN secrets on reruns. Fresh installs download the official image and record its digest.
@@ -140,6 +166,29 @@ The 20 GB upload setting is a limit, not reserved disk capacity. Available space
 - The shared HPB passed public WebSocket and UDP/TCP STUN checks. Its VM was deleted and recreated from a snapshot successfully, with both backend definitions and the original `wolke` secrets intact. The restore exposed cloud-init's default SSH key regeneration; the final scripts now preserve the host keys. Final HPB snapshot: **434940944**.
 
 This was an installation rerun on the existing Nextcloud VM, not a fresh Ubuntu installation test. Nextcloud VM deletion/recreation was not exercised because Hetzner reported no CX23 capacity; the clean snapshot and cold restart were tested instead. Browser document editing and a live multi-party call still need an end-user check.
+
+## Collectives and user import verification on 24 September 2026
+
+- Restored current snapshot **435255619** as a CX23 through Enoch. Cloud-init
+  installed and enabled the activity heartbeat timer. All AIO containers became
+  healthy, including local Collabora.
+- Installed and enabled Collectives **4.7.0** on Nextcloud **35.0.0**. Its
+  integrity check passed, and the required Circles/Teams, Text, Viewer and file
+  versioning apps are enabled.
+- Imported all **15** prepared accounts into the new instance alongside the
+  existing installer administrator. The importer verified four groups, all
+  memberships, 13 quotas at 1 GB, two quotas at 10 GB, manager references and
+  group-admin assignments. The retired `@der-weg-des-herrn.de` addresses are not
+  present in the source file.
+- A real Nextcloud login-page request was detected by the VM agent. Its
+  authenticated heartbeat request to production Enoch completed successfully.
+- The first post-shutdown snapshot request was not confirmed. Enoch waited through
+  its ambiguity window, found no image with that job label, failed closed and kept
+  the powered-off VM. A fresh retry then created and verified current snapshot
+  **435571454** (9.82 GB) with parent label **435255619**, released the VM, and
+  pruned only the superseded unprotected current image.
+- Final cloud state: no VM allocated; protected initial snapshot **434940917** and
+  current snapshot **435571454** remain.
 
 ## References
 
