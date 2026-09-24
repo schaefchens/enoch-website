@@ -5,6 +5,10 @@ from types import SimpleNamespace
 source=Path(__file__).resolve().parents[1].joinpath('server/enoch-agent-install.sh').read_text()
 code=compile(re.search(r"<<'PY'\n(.*?)\nPY",source,re.S).group(1),'agent','exec')
 class AgentTests(unittest.TestCase):
+ def test_embedded_swap_helper_matches_tested_source(self):
+  embedded=re.search(r"<<'SWAP_PY'\n(.*?)\nSWAP_PY",source,re.S).group(1)+'\n'
+  expected=Path(__file__).resolve().parents[1].joinpath('server/prepare-snapshot.py').read_text()
+  self.assertEqual(embedded,expected)
  def execute(self,command,properties,running=''):
   calls=[];printed=[]
   def run(args,**kwargs):

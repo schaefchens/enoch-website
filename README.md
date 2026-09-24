@@ -195,8 +195,10 @@ turn off snapshot saving; the previous current image remains compatible with the
 smaller VM. Discarding changes is clearly confirmed again at shutdown, including
 in the simple interface. Other services are never implicitly started or stopped.
 
-The Nextcloud agent stops AIO, clears the contents of active swap files (with a
-free-memory check and preserved swap UUID/capacity), and trims free blocks before
-VM shutdown. It does not delete Docker images or user files. An already-off VM
-cannot be trimmed retroactively. Snapshot storage size depends on compressed disk
-contents; it is separate from the disk size required to restore the image.
+The Nextcloud agent stops AIO, checks that used swap fits in available memory,
+disables and removes its managed swap files, and trims free blocks before VM
+shutdown. A boot service recreates the same swap capacity and UUID before Docker
+starts. A 30-minute failsafe recreates swap if shutdown aborts after preparation.
+It does not delete Docker images or user files. An already-off VM cannot be
+trimmed retroactively. Snapshot storage size depends on compressed disk contents;
+it is separate from the disk size required to restore the image.

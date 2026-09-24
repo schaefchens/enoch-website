@@ -156,6 +156,8 @@ The local stop command invokes AIO's supported `STOP_CONTAINERS=1` mechanism and
 
 The 20 GB upload setting is a limit, not reserved disk capacity. Available space also holds Docker images, swap, the database, and user files.
 
+Before a managed snapshot, Enoch removes its registered swap file after AIO has stopped and runs filesystem TRIM. The enabled `enoch-swapfile.service` recreates the recorded file during boot before Docker starts. If shutdown fails after preparation, a 30-minute failsafe restores swap on the still-running VM.
+
 ## Verification on 22 September 2026
 
 - The Nextcloud installer ran successfully on the existing Ubuntu 24.04 VM. Shell syntax and all embedded Python blocks were checked.
