@@ -199,9 +199,12 @@ without trustworthy source metadata simply omit the parent label.
 Advanced operators choose initial/current/protected checkpoint, the server type
 and whether this session is saved when it stops. A larger disk snapshot requires
 a larger future VM even if its compressed image is small. Explicit confirmation is required to
-replace the current image with such an image. For a temporary large HPB instance,
-turn off snapshot saving; the previous current image remains compatible with the
-smaller VM. Discarding changes is clearly confirmed again at shutdown, including
+replace the current image with such an image. The HPB has one dedicated exception:
+CCX23 is created through an available 40 GB bootstrap plan and then resized with
+Hetzner's keep-disk option. It therefore supplies four dedicated vCPU and 16 GB
+RAM for live transcription while its saved snapshots remain compatible with
+CPX12 and CX23. Other large HPB sizes still enlarge the disk unless changes are
+discarded. Discarding changes is clearly confirmed again at shutdown, including
 in the simple interface. Other services are never implicitly started or stopped.
 The start dialog shows the selected type's full CPU, memory, disk, architecture,
 location availability, hourly gross price and 24/7 monthly billing maximum. Plan

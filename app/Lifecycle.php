@@ -43,14 +43,19 @@ final class Lifecycle {
         return is_string($after)&&strtotime($after)!==false&&strtotime($after)<=time();
     }
     public function options(array $cfg):array {
-        $initial=$this->initial($cfg);$current=$this->current($cfg);$types=[];
-        foreach($this->cloud->all('server_types') as $t){
+        $initial=$this->initial($cfg);$current=$this->current($cfg);$types=[];$catalog=$this->cloud->all('server_types');
+        $baseType=null;
+        foreach($catalog as $candidate)if(($candidate['name']??null)===$cfg['type']){$baseType=$candidate;break;}
+        if(!$baseType)throw new \RuntimeException('Default server type is unavailable.');
+        foreach($catalog as $t){
             if(($t['architecture']??'')!==$current['architecture']||!empty($t['deprecated'])||($t['storage_type']??'local')!=='local')continue;
             $location=$this->location($t,$cfg['location']);if(!$location||$this->retired($location))continue;
             $price=null;foreach($t['prices']??[] as $candidate)if(($candidate['location']??null)===$cfg['location']){$price=$candidate;break;}
-            $types[]=['name'=>$t['name'],'description'=>$t['description']??strtoupper($t['name']),'category'=>$t['category']??null,'cores'=>$t['cores'],'memory'=>$t['memory'],'disk'=>$t['disk'],'cpu_type'=>$t['cpu_type']??null,'architecture'=>$t['architecture'],'storage_type'=>$t['storage_type']??'local','available'=>$location['available']??null,'price_hourly'=>isset($price['price_hourly']['gross'])?(float)$price['price_hourly']['gross']:null,'price_monthly'=>isset($price['price_monthly']['gross'])?(float)$price['price_monthly']['gross']:null];
+            $keepDisk=in_array($t['name'],$cfg['keep_disk_types']??[],true);
+            $types[]=['name'=>$t['name'],'description'=>$t['description']??strtoupper($t['name']),'category'=>$t['category']??null,'cores'=>$t['cores'],'memory'=>$t['memory'],'disk'=>$t['disk'],'effective_disk'=>$keepDisk?($baseType['disk']??$t['disk']):$t['disk'],'keep_disk'=>$keepDisk,'cpu_type'=>$t['cpu_type']??null,'architecture'=>$t['architecture'],'storage_type'=>$t['storage_type']??'local','available'=>$location['available']??null,'price_hourly'=>isset($price['price_hourly']['gross'])?(float)$price['price_hourly']['gross']:null,'price_monthly'=>isset($price['price_monthly']['gross'])?(float)$price['price_monthly']['gross']:null];
         }
-        $fallbacks=array_values(array_unique($cfg['types']??[$cfg['type']]));$priority=array_flip($fallbacks);
+        $fallbacks=array_values(array_unique($cfg['types']??[$cfg['type']]));
+        $priority=array_flip(array_values(array_unique([...$fallbacks,...($cfg['manual_types']??[])])));
         usort($types,static function(array $a,array $b)use($priority):int{
             $aPriority=$priority[$a['name']]??PHP_INT_MAX;$bPriority=$priority[$b['name']]??PHP_INT_MAX;
             return ($aPriority<=>$bPriority)?:($a['memory']<=>$b['memory'])?:strcmp($a['name'],$b['name']);
@@ -88,7 +93,21 @@ final class Lifecycle {
         $location=$this->location($type,$cfg['location']);
         if(!$location||$this->retired($location)||!empty($type['deprecated'])||($type['storage_type']??'local')!=='local')throw new \RuntimeException('Selected server type is unavailable.');
         if($image['architecture']!==($type['architecture']??'')||$image['disk_size']>($type['disk']??0))throw new \RuntimeException('Snapshot disk is too large for this server type. Choose a larger server or the initial snapshot.');
-        if(($type['disk']??0)>($base['disk']??0)&&$options['save_snapshot']&&empty($options['acknowledge_large_disk']))throw new \RuntimeException('Saving a larger disk replaces the current snapshot with one that cannot restore to the default smaller server. Confirm this or choose not to save changes.');
+        $keepDisk=in_array($type['name']??'', $cfg['keep_disk_types']??[], true);
+        if(($type['disk']??0)>($base['disk']??0)&&!$keepDisk&&$options['save_snapshot']&&empty($options['acknowledge_large_disk']))throw new \RuntimeException('Saving a larger disk replaces the current snapshot with one that cannot restore to the default smaller server. Confirm this or choose not to save changes.');
+    }
+    private function creationPlan(array $target,array $image,array $catalog,array $cfg):array {
+        if(!in_array($target['name'],$cfg['keep_disk_types']??[],true))return ['target'=>$target['name'],'create_types'=>[$target['name']],'keep_disk'=>false];
+        $create=[];$baseDisk=$catalog[$cfg['type']]['disk']??0;
+        foreach($cfg['keep_disk_bootstrap_types']??[] as $name){
+            $type=$catalog[$name]??null;if(!$type)continue;
+            $location=$this->location($type,$cfg['location']);
+            if(!$location||$this->retired($location)||($location['available']??null)===false||!empty($type['deprecated'])||($type['storage_type']??'local')!=='local')continue;
+            if(($type['architecture']??'')!==$image['architecture']||($type['disk']??0)!==$baseDisk||($type['disk']??0)<$image['disk_size'])continue;
+            $create[]=$name;
+        }
+        if(!$create)throw new \RuntimeException('No 40 GB bootstrap server is available for the selected keep-disk size.');
+        return ['target'=>$target['name'],'create_types'=>$create,'keep_disk'=>true];
     }
     public function restorePlan(array $cfg,array $options):array {
         $image=$this->restoreImage($cfg,$options);$catalog=[];
@@ -99,15 +118,15 @@ final class Lifecycle {
             if(!$selected)throw new \RuntimeException('Selected server type is unavailable.');
             $this->validateType($selected,$image,$base,$cfg,$options);
         }
-        $names=array_values(array_unique([$options['type'],...($cfg['types']??[$cfg['type']])]));$types=[];
+        $names=array_values(array_unique([$options['type'],...($cfg['types']??[$cfg['type']])]));$types=[];$plans=[];
         foreach($names as $name){
             $type=$catalog[$name]??null;if(!$type)continue;
             try{$this->validateType($type,$image,$base,$cfg,$options);}catch(\RuntimeException){continue;}
             $location=$this->location($type,$cfg['location']);if(($location['available']??null)===false)continue;
-            $types[]=$name;
+            $types[]=$name;$plans[]=$this->creationPlan($type,$image,$catalog,$cfg);
         }
         if(!$types)throw new \RuntimeException('No configured compatible server type is currently available in '.strtoupper($cfg['location']).'.');
-        return ['image'=>$image,'types'=>$types];
+        return ['image'=>$image,'types'=>$types,'plans'=>$plans];
     }
     public function restore(array $cfg,array $options):array {return $this->restorePlan($cfg,$options)['image'];}
     // One deletion per worker tick. Initial/checkpoint/protected/foreign images are never candidates.

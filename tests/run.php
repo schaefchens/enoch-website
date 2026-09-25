@@ -14,14 +14,14 @@ final class FakeCloud extends Cloud {
     public array $unavailableTypes=[];
     public function __construct(public array $cfg){parent::__construct('fake');}
     public function seed(string $state='running'):array {
-        $s=['id'=>10,'name'=>$this->cfg['name'],'status'=>$state,'labels'=>[],'image'=>['id'=>$this->cfg['initial_image']], 'public_net'=>['ipv4'=>['id'=>$this->cfg['ipv4'],'ip'=>'192.0.2.1'],'ipv6'=>['id'=>$this->cfg['ipv6']]],'server_type'=>['name'=>$this->cfg['type']]];
+        $s=['id'=>10,'name'=>$this->cfg['name'],'status'=>$state,'primary_disk_size'=>40,'labels'=>[],'image'=>['id'=>$this->cfg['initial_image']], 'public_net'=>['ipv4'=>['id'=>$this->cfg['ipv4'],'ip'=>'192.0.2.1'],'ipv6'=>['id'=>$this->cfg['ipv6']]],'server_type'=>['name'=>$this->cfg['type']]];
         $this->servers=[$s];return $s;
     }
     public function image(array $labels=[]):array{return ['id'=>20,'description'=>'test-current','created'=>'2026-09-22T00:00:00Z','type'=>'snapshot','status'=>'available','created_from'=>['id'=>10],'architecture'=>'x86','disk_size'=>40,'protection'=>['delete'=>false],'labels'=>$this->cfg['labels']+$labels];}
     private function type(string $name):array {
-        $specs=['cx23'=>[2,4,40,0.010472,6.5331,'CX 23','cost_optimized'],'cpx12'=>[1,2,40,0.021896,13.6731,'CPX 12','regular_purpose'],'cpx22'=>[2,4,80,0.037128,23.1931,'CPX 22','regular_purpose'],'cx53'=>[16,32,320,0.056287,35.0931,'CX 53','cost_optimized']];
-        [$cores,$memory,$disk,$hourly,$monthly,$description,$category]=$specs[$name]??[2,4,40,0.01,7.00,strtoupper($name),'cost_optimized'];
-        return ['name'=>$name,'description'=>$description,'category'=>$category,'cores'=>$cores,'memory'=>$memory,'architecture'=>'x86','disk'=>$disk,'storage_type'=>'local','cpu_type'=>'shared','deprecated'=>false,'locations'=>[['name'=>'fsn1','available'=>!in_array($name,$this->unavailableTypes,true),'deprecation'=>null]],'prices'=>[['location'=>'fsn1','price_hourly'=>['gross'=>(string)$hourly],'price_monthly'=>['gross'=>(string)$monthly]]]];
+        $specs=['cx23'=>[2,4,40,0.010472,6.5331,'CX 23','cost_optimized','shared'],'cpx12'=>[1,2,40,0.021896,13.6731,'CPX 12','regular_purpose','shared'],'cpx22'=>[2,4,80,0.037128,23.1931,'CPX 22','regular_purpose','shared'],'ccx23'=>[4,16,160,0.163982,102.3281,'CCX 23','dedicated','dedicated'],'cx53'=>[16,32,320,0.056287,35.0931,'CX 53','cost_optimized','shared']];
+        [$cores,$memory,$disk,$hourly,$monthly,$description,$category,$cpuType]=$specs[$name]??[2,4,40,0.01,7.00,strtoupper($name),'cost_optimized','shared'];
+        return ['name'=>$name,'description'=>$description,'category'=>$category,'cores'=>$cores,'memory'=>$memory,'architecture'=>'x86','disk'=>$disk,'storage_type'=>'local','cpu_type'=>$cpuType,'deprecated'=>false,'locations'=>[['name'=>'fsn1','available'=>!in_array($name,$this->unavailableTypes,true),'deprecation'=>null]],'prices'=>[['location'=>'fsn1','price_hourly'=>['gross'=>(string)$hourly],'price_monthly'=>['gross'=>(string)$monthly]]]];
     }
     public function request(string $method,string $path,?array $body=null):array{
         if($method!=='GET')$this->calls[]=[$method,$path,$body];
@@ -35,19 +35,20 @@ final class FakeCloud extends Cloud {
                 return ['images'=>$images];
             }
             if(str_starts_with($base,'/images/')){if((int)basename($base)===$this->cfg['initial_image']&&!$this->missingInitial){$i=$this->image();$i['id']=$this->cfg['initial_image'];$i['description']='test-initial';$i['protection']=['delete'=>true];return ['image'=>$i];}foreach($this->images as $i)if($i['id']===(int)basename($base))return ['image'=>$i];return ['not_found'=>true];}
-            if($base==='/server_types')return ['server_types'=>isset($q['name'])?[$this->type($q['name'])]:array_map($this->type(...),array_values(array_unique([...($this->cfg['types']??[$this->cfg['type']]),'cpx22','cx53'])))];
+            if($base==='/server_types')return ['server_types'=>isset($q['name'])?[$this->type($q['name'])]:array_map($this->type(...),array_values(array_unique([...($this->cfg['types']??[$this->cfg['type']]),...($this->cfg['manual_types']??[]),'cpx22','cx53'])))];
             if(str_starts_with($base,'/firewalls/'))return ['firewall'=>['id'=>1]];
         }
         if($method==='POST'&&$path==='/servers'){
             if($this->capacityRejects>0){$this->capacityRejects--;throw new CloudRejected(422,'resource_unavailable','Hetzner returned HTTP 422 (resource_unavailable).');}
             if($this->rejectCreateCode!==null)throw new CloudRejected(422,$this->rejectCreateCode,'Hetzner returned HTTP 422 ('.$this->rejectCreateCode.').');
-            $s=$this->seed();$this->servers[0]['labels']=$body['labels'];
+            $s=$this->seed(!empty($body['start_after_create'])?'running':'off');$this->servers[0]['labels']=$body['labels'];
             $this->servers[0]['server_type']['name']=$body['server_type'];
             $this->servers[0]['image']=['id'=>(int)$body['image']];
             if($this->loseCreateResponse)throw new RuntimeException('Lost create response');
             return ['server'=>$this->servers[0]];
         }
         if(str_ends_with($path,'/poweron')){$this->servers[0]['status']='running';return ['action'=>['id'=>1]];}
+        if(str_ends_with($path,'/change_type')){$this->servers[0]['server_type']['name']=$body['server_type'];if(!empty($body['upgrade_disk']))$this->servers[0]['primary_disk_size']=$this->type($body['server_type'])['disk'];return ['action'=>['id'=>5]];}
         if(str_ends_with($path,'/shutdown')){$this->servers[0]['status']='off';return ['action'=>['id'=>2]];}
         if(str_ends_with($path,'/create_image')){
             if($this->rejectSnapshot)throw new RuntimeException('Snapshot failed');
@@ -133,6 +134,15 @@ try{
     check($catalog['default_type']==='cx23'&&$catalog['fallback_types']===['cx23','cpx12']&&array_slice(array_column($catalog['types'],'name'),0,2)===['cx23','cpx12']&&($cx['category']??null)==='cost_optimized'&&($cx['price_hourly']??null)===0.010472&&($cx['price_monthly']??null)===6.5331&&($cpx['category']??null)==='regular_purpose'&&($cpx['price_hourly']??null)===0.021896&&($cpx['price_monthly']??null)===13.6731,'server options keep the configured default, order, product class and price attached to each server type');
     [$s,$c,$h,$e]=fixture('hpb');$c->seed();$e->enqueue('hpb','stop','alice');for($n=0;$n<10;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&!$h->commands,'HPB lifecycle is independent of Nextcloud');
+    [$s,$c,$h,$e]=fixture('hpb');$c->images=[$c->image()];$catalog=(new Lifecycle($c))->options($config->services['hpb']);
+    $large=array_values(array_filter($catalog['types'],fn($type)=>$type['name']==='ccx23'))[0]??[];
+    check(($large['keep_disk']??false)&&($large['effective_disk']??0)===40&&($large['memory']??0)===16,'HPB CCX23 is presented as a 16 GB keep-disk size');
+    $e->enqueue('hpb','start','alice',['type'=>'ccx23']);for($n=0;$n<7;$n++)$j=tick($s,$c,$h);
+    $mutations=array_values(array_filter($c->calls,fn($call)=>$call[0]==='POST'));
+    check($j['status']==='done'&&array_column($mutations,1)===['/servers','/servers/10/actions/change_type','/servers/10/actions/poweron'],'large HPB restores, resizes with the disk retained, then powers on');
+    check($mutations[0][2]['server_type']==='cpx12'&&$mutations[0][2]['start_after_create']===false&&$mutations[1][2]===['server_type'=>'ccx23','upgrade_disk'=>false]&&$c->servers[0]['primary_disk_size']===40,'CCX23 keeps the HPB root disk at 40 GB');
+    $e->enqueue('hpb','stop','alice');for($n=0;$n<12;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&$c->servers===[]&&count($c->images)===1,'a saved CCX23 session produces a current snapshot that can return to a small HPB');
     [$s,$c,$h,$e]=fixture();$auth=new Auth($config,$s);$auth->addUser('alice','test-password-long','operator');
     check(refuses(fn()=>$auth->addUser('alice','test-password-long','admin')),'duplicate accounts rejected');
     check(refuses(fn()=>$auth->addUser('bob','short','admin')),'short passwords rejected');

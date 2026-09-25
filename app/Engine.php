@@ -32,7 +32,7 @@ final class Engine {
             catch(\Throwable $e){
                 // An intent is durable before every cloud write. Its next phase reconciles
                 // observed state, including when PHP died before saving an API response.
-                if(!$e instanceof CloudRejected&&in_array($j['phase'],['creating','powering','shutting-down','snapshotting','protecting','deleting'],true)&&time()-(int)$j['phase_since']<120){
+                if(!$e instanceof CloudRejected&&in_array($j['phase'],['creating','resizing','powering','shutting-down','snapshotting','protecting','deleting'],true)&&time()-(int)$j['phase_since']<120){
                     $this->store->query('UPDATE jobs SET message=? WHERE id=?',['Checking the result of a cloud request before continuing.',$j['id']]);
                 }else{$this->advance($j,'failed',$e->getMessage(),[],'failed');}
             }
@@ -63,29 +63,34 @@ final class Engine {
                     $this->advance($j,'powering','Powering on',['server'=>$s['id']]);
                     $this->cloud->request('POST','/servers/'.$s['id'].'/actions/poweron');return;
                 }
-                if(isset($j['data']['type_candidates'],$j['data']['type_index'],$j['data']['image'])){
-                    $types=$j['data']['type_candidates'];$typeIndex=(int)$j['data']['type_index'];
+                if(isset($j['data']['type_plans'],$j['data']['type_index'],$j['data']['image'])){
+                    $plans=$j['data']['type_plans'];$typeIndex=(int)$j['data']['type_index'];
                     $image=$this->cloud->request('GET','/images/'.$j['data']['image'])['image']??[];$this->cloud->imageValid($image,$cfg);
                 }else{
-                    $plan=$life->restorePlan($cfg,$options);$image=$plan['image'];$types=$plan['types'];$typeIndex=0;
+                    $restore=$life->restorePlan($cfg,$options);$image=$restore['image'];$plans=$restore['plans'];$typeIndex=0;
                 }
-                $type=$types[$typeIndex]??throw new \RuntimeException('No compatible server type remains in the fallback list.');
+                $plan=$plans[$typeIndex]??throw new \RuntimeException('No compatible server type remains in the fallback list.');
+                $type=$plan['target'];$createIndex=(int)($j['data']['create_type_index']??0);
+                $createType=$plan['create_types'][$createIndex]??throw new \RuntimeException('No compatible 40 GB bootstrap server remains for this size.');
                 $firewall=$this->cloud->request('GET','/firewalls/'.$cfg['firewall']);
                 if(!isset($firewall['firewall']))throw new \RuntimeException('Configured firewall is missing.');
                 $userData=Provision::cloudInit($this->config,$cfg,$j['service']);
-                $this->advance($j,'creating','Restoring the selected snapshot on '.strtoupper($type),['image'=>$image['id'],'save_snapshot'=>$options['save_snapshot'],'type_candidates'=>$types,'type_index'=>$typeIndex,'server_type'=>$type]);
+                $message=$plan['keep_disk']?'Restoring a 40 GB VM before resizing to '.strtoupper($type):'Restoring the selected snapshot on '.strtoupper($type);
+                $this->advance($j,'creating',$message,['image'=>$image['id'],'save_snapshot'=>$options['save_snapshot'],'type_plans'=>$plans,'type_index'=>$typeIndex,'create_type_index'=>$createIndex,'server_type'=>$type]);
                 try{$r=$this->cloud->request('POST','/servers',[
-                        'name'=>$cfg['name'],'server_type'=>$type,'location'=>$cfg['location'],'image'=>$image['id'],
+                        'name'=>$cfg['name'],'server_type'=>$createType,'location'=>$cfg['location'],'image'=>$image['id'],
                         'ssh_keys'=>$cfg['ssh_keys'],'firewalls'=>[['firewall'=>$cfg['firewall']]],
                         'public_net'=>['enable_ipv4'=>true,'enable_ipv6'=>true,'ipv4'=>$cfg['ipv4'],'ipv6'=>$cfg['ipv6']],
-                        'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'enoch-save'=>$options['save_snapshot']?'yes':'no','enoch-source'=>(string)$image['id'],'enoch-type'=>$type], 'start_after_create'=>true,
+                        'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'enoch-save'=>$options['save_snapshot']?'yes':'no','enoch-source'=>(string)$image['id'],'enoch-type'=>$type,'enoch-disk'=>$plan['keep_disk']?'keep':'native'], 'start_after_create'=>!$plan['keep_disk'],
                         'user_data'=>$userData,
                     ]);
                 }catch(CloudRejected $e){
                     if(!$e->isCapacityUnavailable())throw $e;
-                    $next=$typeIndex+1;
-                    if(!isset($types[$next])){$this->advance($j,'failed','Hetzner has no capacity for the configured server types: '.strtoupper(implode(', ',$types)).'.',[],'failed');return;}
-                    $this->advance($j,'queued',strtoupper($type).' has no capacity; trying '.strtoupper($types[$next]),['type_index'=>$next,'server_type'=>$types[$next]]);return;
+                    $nextCreate=$createIndex+1;
+                    if(isset($plan['create_types'][$nextCreate])){$this->advance($j,'queued',strtoupper($createType).' has no capacity for the 40 GB bootstrap; trying '.strtoupper($plan['create_types'][$nextCreate]),['create_type_index'=>$nextCreate]);return;}
+                    $next=$typeIndex+1;$targets=array_column($plans,'target');
+                    if(!isset($plans[$next])){$this->advance($j,'failed','Hetzner has no capacity for the configured server types: '.strtoupper(implode(', ',$targets)).'.',[],'failed');return;}
+                    $this->advance($j,'queued',strtoupper($type).' has no capacity; trying '.strtoupper($plans[$next]['target']),['type_index'=>$next,'create_type_index'=>0,'server_type'=>$plans[$next]['target']]);return;
                 }
                 if(isset($r['server']['id']))$this->advance($j,'creating','Waiting for the restored VM',['server'=>$r['server']['id']]);return;
             }
@@ -107,7 +112,28 @@ final class Engine {
         case 'creating':
             if(!$s){if($age>120)throw new \RuntimeException('Creation was not confirmed. Check Hetzner capacity and activity before retrying.');return;}
             if(($s['labels']['enoch-job']??null)!==$j['id'])throw new \RuntimeException('A different process created this VM. No further changes made.');
+            $plans=$j['data']['type_plans']??[];$plan=$plans[(int)($j['data']['type_index']??0)]??null;
+            if($plan&&$plan['keep_disk']){
+                if(($s['server_type']['name']??'')===$plan['target']){
+                    if(($s['primary_disk_size']??PHP_INT_MAX)>($cfg['keep_disk_size']??0))throw new \RuntimeException('The keep-disk resize enlarged the root disk; the VM is retained for inspection.');
+                    $this->advance($j,'powering','Resize complete; powering on the 40 GB VM');
+                    $this->cloud->request('POST','/servers/'.$s['id'].'/actions/poweron');return;
+                }
+                if($s['status']!=='off')throw new \RuntimeException('The keep-disk VM must remain off while changing server type.');
+                $this->advance($j,'resizing','Increasing CPU and memory while retaining the 40 GB disk');
+                $this->cloud->request('POST','/servers/'.$s['id'].'/actions/change_type',['server_type'=>$plan['target'],'upgrade_disk'=>false]);return;
+            }
             if($s['status']==='running')$this->advance($j,'ready','Checking the restored service',['server'=>$s['id']]);return;
+        case 'resizing':
+            if(!$s)throw new \RuntimeException('Server disappeared during its keep-disk resize.');
+            $plans=$j['data']['type_plans']??[];$plan=$plans[(int)($j['data']['type_index']??0)]??null;
+            if(!$plan||!$plan['keep_disk'])throw new \RuntimeException('Keep-disk resize metadata is missing. The VM is retained.');
+            if(($s['server_type']['name']??'')===$plan['target']){
+                if(($s['primary_disk_size']??PHP_INT_MAX)>($cfg['keep_disk_size']??0))throw new \RuntimeException('The keep-disk resize enlarged the root disk; the VM is retained for inspection.');
+                $this->advance($j,'powering','Resize complete; powering on the 40 GB VM');
+                $this->cloud->request('POST','/servers/'.$s['id'].'/actions/poweron');return;
+            }
+            if($age>600)throw new \RuntimeException('The CPU/RAM resize was not confirmed. The off VM is retained.');return;
         case 'powering':
             if(!$s)throw new \RuntimeException('Server disappeared during startup.');
             if($s['status']==='running')$this->advance($j,'ready','Checking service health');

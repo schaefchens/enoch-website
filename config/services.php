@@ -31,6 +31,12 @@ return [
         'credential_fields' => ['wolke_secret'=>'Signaling secret · wolke','wolke2_secret'=>'Signaling secret · wolke2','turn_secret'=>'TURN secret'],
         'name' => 'hpb', 'aliases' => ['hpb.schaefchens.de'], 'location' => 'fsn1', 'type' => 'cpx12',
         'types' => ['cpx12', 'cx23'],
+        // CCX23 supplies the CPU/RAM needed for live transcription. Restore on a
+        // 40 GB plan first, then resize CPU/RAM while explicitly retaining that disk.
+        'manual_types' => ['ccx23'],
+        'keep_disk_types' => ['ccx23'],
+        'keep_disk_bootstrap_types' => ['cpx12', 'cx23'],
+        'keep_disk_size' => 40,
         'ipv4' => 97117715, 'ipv6' => 97117717, 'firewall' => 11602103, 'ssh_keys' => [100740697],
         'labels' => ['service' => 'nextcloud-talk-hpb', 'lifecycle' => 'managed'],
         'prepare' => null, 'ready_url' => 'https://hpb.schaefchens.de/api/v1/welcome', 'ready_kind' => 'hpb',
