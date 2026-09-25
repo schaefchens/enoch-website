@@ -129,7 +129,8 @@ try{
     [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$c->capacityRejects=2;$e->enqueue('nextcloud','start','alice');tick($s,$c,$h);$j=tick($s,$c,$h);
     check($j['status']==='failed'&&str_contains($j['message'],'CX23, CPX12'),'exhausted fallback list reports every attempted server type');
     [$s,$c]=fixture();$c->images=[$c->image()];$catalog=(new Lifecycle($c))->options($config->services['nextcloud']);$cx=array_values(array_filter($catalog['types'],fn($type)=>$type['name']==='cx23'))[0]??[];
-    check($catalog['fallback_types']===['cx23','cpx12']&&($cx['price_hourly']??null)===0.010472&&($cx['price_monthly']??null)===6.5331,'server options expose ordered fallbacks and current hourly and monthly prices');
+    $cpx=array_values(array_filter($catalog['types'],fn($type)=>$type['name']==='cpx12'))[0]??[];
+    check($catalog['fallback_types']===['cx23','cpx12']&&($cx['category']??null)==='cost_optimized'&&($cx['price_hourly']??null)===0.010472&&($cx['price_monthly']??null)===6.5331&&($cpx['category']??null)==='regular_purpose'&&($cpx['price_hourly']??null)===0.021896&&($cpx['price_monthly']??null)===13.6731,'server options keep each product class and price attached to its server type');
     [$s,$c,$h,$e]=fixture('hpb');$c->seed();$e->enqueue('hpb','stop','alice');for($n=0;$n<10;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&!$h->commands,'HPB lifecycle is independent of Nextcloud');
     [$s,$c,$h,$e]=fixture();$auth=new Auth($config,$s);$auth->addUser('alice','test-password-long','operator');

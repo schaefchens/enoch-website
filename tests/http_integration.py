@@ -30,11 +30,19 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
    except OSError:time.sleep(.05)
   assert status==200 and b'Set up your workspace' in body
   assert 'frame-ancestors' in headers['Content-Security-Policy']
+  assert b'rel="manifest" href="/manifest.webmanifest"' in body and b'name="app-version" content="20260925-pwa-1"' in body
+  assert b'class="preferences"' not in body and b'1 Corinthians 16:14' not in body
+  status,manifest,_=request('/manifest.webmanifest');manifest=json.loads(manifest)
+  assert status==200 and manifest['display']=='standalone' and {icon['sizes'] for icon in manifest['icons']}=={'192x192','512x512'}
+  status,version,_=request('/version.php');assert status==200 and json.loads(version)['version']=='20260925-pwa-1'
+  status,worker,_=request('/sw.js');assert status==200 and b"const VERSION='20260925-pwa-1'" in worker and b"url.pathname.startsWith('/assets/')" in worker
+  assert request('/assets/icon-192.png')[0]==200 and request('/assets/icon-512.png')[0]==200 and request('/assets/apple-touch-icon.png')[0]==200
   assert request('/api.php')[0]==401
   token=re.search(rb'name="csrf" value="([^"]+)"',body).group(1).decode()
   data=urllib.parse.urlencode(dict(csrf=token,key='a'*64,name='testadmin',password='a-long-test-password')).encode()
   status,body,_=request('/',data,{'Content-Type':'application/x-www-form-urlencoded'})
   assert status==200 and b'data-role="admin"' in body
+  assert b'class="sidebar"' in body and b'class="display-toolbar"' in body and b'class="scripture"' in body
   token=re.search(rb'name="csrf-token" content="([^"]+)"',body).group(1).decode()
   assert post('job',{'service':'nextcloud','operation':'stop'},'wrong')[0]==400
   assert post('user',{'name':'testviewer','password':'a-viewer-test-password','role':'viewer'},token)[0]==200
@@ -75,6 +83,8 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   request('/',urllib.parse.urlencode(dict(csrf=token,action='logout')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
   status,body,_=request('/');token=re.search(rb'name="csrf" value="([^"]+)"',body).group(1).decode()
   status,body,_=request('/',urllib.parse.urlencode(dict(csrf=token,name='testviewer',password='a-viewer-test-password')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
+  assert b'class="shell simple-shell"' in body and b'class="simple-topbar"' in body
+  assert b'class="sidebar"' not in body and b'class="display-toolbar"' not in body and b'class="scripture"' not in body
   token=re.search(rb'name="csrf-token" content="([^"]+)"',body).group(1).decode()
   assert post('job',{'service':'nextcloud','operation':'stop'},token)[0]==403
   assert post('user',{'name':'intruder','password':'a-long-test-password','role':'admin'},token)[0]==403
@@ -86,6 +96,6 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   assert data['services']==[] and data['users']==[] and data['tasks']==[] and data['audit']==[]
   assert 'cron_seen' not in data
   assert 'hidden-test-signaling' not in body.decode()
-  print('HTTP integration passed: setup, login, CSRF, roles, session logout, secret exclusion and cron authentication.')
+  print('HTTP integration passed: setup, PWA assets, simple/technical views, CSRF, roles, session logout, secret exclusion and cron authentication.')
   print(f'Cron acknowledged in {elapsed:.3f}s while downstream work took 3s.')
  finally:server.terminate();server.wait();slow.shutdown()

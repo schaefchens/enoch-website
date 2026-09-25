@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SFTP deployment. Keeps live secrets and state on updates; no remote shell needed."""
 from pathlib import Path
-import argparse, json, os, shutil, sqlite3, subprocess, tempfile, urllib.request, urllib.error
+import argparse, json, os, re, shutil, sqlite3, subprocess, tempfile, urllib.request, urllib.error
 ROOT=Path(__file__).resolve().parents[1]
 def env_values(path):
  result={}
@@ -65,7 +65,16 @@ def main():
   for path in ('/_enoch/.env','/_enoch/var/enoch.sqlite','/_enoch/vendor/autoload.php'):
    if get(path)[0]!=403:raise RuntimeError('A private file is not denied: '+path)
   status,body=get('/')
-  if status!=200 or b'Enoch' not in body:raise RuntimeError('Deployment uploaded, but the homepage check failed.')
+  if status!=200 or b'Enoch' not in body or b'/manifest.webmanifest' not in body:raise RuntimeError('Deployment uploaded, but the homepage check failed.')
+  status,manifest=get('/manifest.webmanifest')
+  if status!=200 or json.loads(manifest).get('display')!='standalone':raise RuntimeError('The PWA manifest check failed.')
+  version=re.search(r"return\s+'([^']+)';",(ROOT/'config/version.php').read_text()).group(1)
+  status,remote_version=get('/version.php')
+  if status!=200 or json.loads(remote_version).get('version')!=version:raise RuntimeError('The deployed application version does not match the release.')
+  status,worker=get('/sw.js')
+  if status!=200 or version.encode() not in worker:raise RuntimeError('The service worker version does not match the release.')
+  for icon in ('/assets/icon-192.png','/assets/icon-512.png','/assets/apple-touch-icon.png'):
+   if get(icon)[0]!=200:raise RuntimeError('A PWA icon is unavailable: '+icon)
   print('Deployment verified at '+base+'/',flush=True)
 if __name__=='__main__':
  try:main()

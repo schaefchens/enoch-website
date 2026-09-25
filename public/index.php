@@ -21,7 +21,7 @@ $user=$auth->user();
 $technical=$user&&($user['ui_mode']==='technical'||$user['role']==='admin');
 $admin=$user&&$user['role']==='admin';
 $e=Web::escape(...);
-$version='20260925-server-fallbacks-1';
+$version=require $config->root.'/config/version.php';
 $i18n=new Enoch\I18n($config);$tr=$i18n->text(...);$t=static fn(string $text)=>Web::escape($tr($text));
 $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View only'];
 ?>
@@ -30,9 +30,17 @@ $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View o
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="theme-color" content="#243f55">
+    <meta name="application-name" content="Enoch">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="app-version" content="<?=$e($version)?>">
     <title><?=$t('Enoch · Faithful stewardship')?></title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+    <link rel="manifest" href="/manifest.webmanifest">
     <script src="/assets/preferences.js?v=<?=$version?>"></script>
+    <script src="/assets/pwa.js?v=<?=$version?>" defer></script>
     <link rel="stylesheet" href="/assets/app.css?v=<?=$version?>">
     <script type="application/json" id="translations"><?=json_encode($i18n->messages,JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_QUOT|JSON_HEX_APOS)?></script>
     <?php if($user): ?>
@@ -50,9 +58,8 @@ $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View o
     <div class="login-story">
         <a class="brand" href="/"><span class="brand-mark"><?=$t('e')?></span><span>enoch</span><i aria-hidden="true">●</i></a>
         <div><p class="eyebrow"><?=$t('SCHAEFCHENS / A SHARED WORK')?></p><h1><?=$t('Faithful in')?><br><?=$t('the little things.')?></h1><p><?=$t('A place to tend what we have been given.')?><br><?=$t('In service to the body of Christ.')?></p></div>
-        <small><?=$t('“Let all things be done with charity.”')?><br><?=$t('1 Corinthians 16:14 · KJV')?></small>
     </div>
-    <div class="login-side"><div class="login-preferences"><?=$preferences?></div>
+    <div class="login-side">
         <form method="post" class="login-form">
             <p class="eyebrow"><?=$t('WELCOME TO ENOCH')?></p>
             <h2><?=$setup?$tr('Set up your workspace'):$tr('Welcome back.')?></h2>
@@ -68,7 +75,8 @@ $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View o
     </div>
 </main>
 <?php else: ?>
-<div class="shell">
+<div class="shell <?=$technical?'':'simple-shell'?>">
+    <?php if($technical): ?>
     <aside class="sidebar">
         <a class="brand" href="/"><span class="brand-mark"><?=$t('e')?></span><span>enoch</span><i aria-hidden="true">●</i></a>
         <p class="workspace">SCHAEFCHENS<span><?=$t('A place of stewardship')?></span></p>
@@ -83,14 +91,24 @@ $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View o
             <form method="post"><input type="hidden" name="csrf" value="<?=$e($_SESSION['csrf'])?>"><input type="hidden" name="action" value="logout"><button class="logout" aria-label="<?=$t('Sign out')?>" title="<?=$t('Sign out')?>">↗</button></form>
         </div>
     </aside>
+    <?php endif ?>
     <main class="main">
-        <header class="topbar"><span>Enoch <span aria-hidden="true">/</span> <strong id="page-label"><?=$technical?$tr('Overview'):$tr('My services')?></strong></span><span id="refresh-label"><?=$t('Checking your services…')?></span></header>
-        <div class="content"><div class="display-toolbar"><?=$preferences?></div>
+        <?php if($technical): ?>
+        <header class="topbar"><span>Enoch <span aria-hidden="true">/</span> <strong id="page-label"><?=$tr('Overview')?></strong></span><span id="refresh-label"><?=$t('Checking your services…')?></span></header>
+        <?php else: ?>
+        <header class="simple-topbar">
+            <a class="brand" href="/"><span class="brand-mark"><?=$t('e')?></span><span>enoch</span></a>
+            <nav class="simple-topnav" aria-label="<?=$t('Main navigation')?>"><button class="nav simple-nav active" data-page="servers" aria-current="page"><?=$t('My services')?></button><button class="nav simple-nav" data-page="team"><?=$t('My account')?></button></nav>
+            <form method="post"><input type="hidden" name="csrf" value="<?=$e($_SESSION['csrf'])?>"><input type="hidden" name="action" value="logout"><button class="simple-logout" aria-label="<?=$t('Sign out')?>"><?=$t('Sign out')?> ↗</button></form>
+            <span id="page-label" hidden><?=$t('My services')?></span><span id="refresh-label" hidden><?=$t('Checking your services…')?></span>
+        </header>
+        <?php endif ?>
+        <div class="content"><?php if($technical): ?><div class="display-toolbar"><?=$preferences?></div><?php endif ?>
             <div id="notice" class="notice" role="status" hidden></div>
             <section id="page-servers" class="page">
                 <div class="page-heading">
                     <div><p class="eyebrow"><?=$technical?$tr('FAITHFUL STEWARDSHIP'):$tr('SERVING ONE ANOTHER')?></p><h1><?=$technical?$tr('Tend what is entrusted.'):$tr('Welcome, ').$e($user['name']).'.'?></h1><p><?=$technical?$tr('Care for the tools that serve our fellowship.'):$tr('Turn on the service you need. Open it when it is ready.')?></p></div>
-                    <button id="refresh" class="secondary"><span aria-hidden="true">↻</span> <?=$t('Refresh')?></button>
+                    <?php if($technical): ?><button id="refresh" class="secondary"><span aria-hidden="true">↻</span> <?=$t('Refresh')?></button><?php endif ?>
                 </div>
                 <?php if($technical): ?>
                 <div class="summary">
@@ -111,7 +129,7 @@ $roleNames=['admin'=>'Administrator','operator'=>'Team member','viewer'=>'View o
                 <?php else: ?>
                     <p class="simple-help"><?=$t('Getting ready can take a few minutes. You can leave this page and come back later.')?></p>
                 <?php endif ?>
-                <blockquote class="scripture"><?=$t('“Moreover it is required in stewards, that a man be found faithful.”')?><cite><?=$t('1 Corinthians 4:2 · KJV')?></cite></blockquote>
+                <?php if($technical): ?><blockquote class="scripture"><?=$t('“Moreover it is required in stewards, that a man be found faithful.”')?><cite><?=$t('1 Corinthians 4:2 · KJV')?></cite></blockquote><?php endif ?>
             </section>
             <?php if($technical): ?>
             <section id="page-activity" class="page" hidden>

@@ -1,0 +1,27 @@
+{
+  "id": "/",
+  "name": "Enoch Infrastructure",
+  "short_name": "Enoch",
+  "description": "Start, stop and maintain the shared Schaefchens services.",
+  "lang": "en",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f8f4ea",
+  "theme_color": "#243f55",
+  "icons": [
+    {
+      "src": "/assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

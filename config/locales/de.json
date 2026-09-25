@@ -342,7 +342,11 @@
   "Architecture": "Architektur",
   "Per hour": "Pro Stunde",
   "24/7 per month": "24/7 pro Monat",
+  "Gross per hour": "Brutto pro Stunde",
+  "Monthly price cap": "Monatlicher Höchstpreis",
+  "monthly cap": "Monatshöchstpreis",
   "Hetzner gross prices for {location}; the monthly value is the 24/7 billing maximum.": "Hetzner-Bruttopreise für {location}; der Monatswert ist der Höchstpreis bei Betrieb rund um die Uhr.",
+  "Hetzner gross prices for {location}. Prices belong to the named plan; product classes can make a larger cost-optimized plan cheaper than a smaller regular-performance plan.": "Hetzner-Bruttopreise für {location}. Die Preise gehören jeweils zum genannten Tarif; durch unterschiedliche Produktklassen kann ein größerer kostenoptimierter Tarif günstiger sein als ein kleinerer Tarif mit regulärer Leistung.",
   "Automatic fallback order": "Automatische Ausweichreihenfolge",
   "If Hetzner cannot allocate a size, Enoch automatically tries the next compatible size.": "Wenn Hetzner eine Größe nicht bereitstellen kann, versucht Enoch automatisch die nächste passende Größe.",
   "Selected server type is unavailable.": "Die ausgewählte Servergröße ist nicht verfügbar."

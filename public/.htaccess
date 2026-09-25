@@ -1,6 +1,7 @@
 Require all granted
 Options -Indexes
 DirectoryIndex index.php
+AddType application/manifest+json .webmanifest
 SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
 <FilesMatch "^\.">
     Require all denied
@@ -8,4 +9,8 @@ SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
 <IfModule mod_headers.c>
     Header always set X-Content-Type-Options "nosniff"
     Header always set Referrer-Policy "no-referrer"
+    <Files "sw.js">
+        Header always set Cache-Control "no-store, no-cache, must-revalidate"
+        Header always set Service-Worker-Allowed "/"
+    </Files>
 </IfModule>

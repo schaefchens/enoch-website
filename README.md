@@ -150,11 +150,20 @@ confirmation and retains the previous current, initial and protected checkpoint
 snapshots. Restore source, server size and checkpoint creation still require the
 separate advanced permission.
 
-German and English default from `Accept-Language`; language and appearance can be
-changed on both the login page and inside the portal. Appearance follows the OS
-unless explicitly selected. Catalogs are in `config/locales`; translations use
-English keys with English fallback. To add a language, add its catalog and register
-it in `I18n.php`, the preference selector and `preferences.js`.
+German and English default from `Accept-Language`, while appearance follows the
+operating system. Technical accounts can override both settings inside the portal.
+The simple interface intentionally omits these controls, the infrastructure
+sidebar and decorative scripture so it stays focused on the assigned services and
+large action buttons. Catalogs are in `config/locales`; translations use English
+keys with English fallback. To add a language, add its catalog and register it in
+`I18n.php`, the preference selector and `preferences.js`.
+
+The portal is installable as a PWA. Its manifest provides the standalone identity
+and platform icons. The service worker caches only versioned static assets; pages,
+API responses and lifecycle actions remain network-only. `/version.php` is checked
+when the app opens, returns to the foreground and every five minutes. A new release
+activates the new service worker and reloads the page, preventing an installed app
+from remaining on an obsolete cached bundle.
 
 Credential values are served only after an authenticated, CSRF-checked request and
 an explicit per-service credential grant. They are absent from the dashboard JSON,
@@ -195,8 +204,10 @@ turn off snapshot saving; the previous current image remains compatible with the
 smaller VM. Discarding changes is clearly confirmed again at shutdown, including
 in the simple interface. Other services are never implicitly started or stopped.
 The start dialog shows the selected type's full CPU, memory, disk, architecture,
-location availability, hourly gross price and 24/7 monthly billing maximum. It also
-shows the automatic fallback order. Simple-mode members do not make infrastructure
+location availability, hourly gross price and 24/7 monthly billing maximum. Plan
+IDs, product classes, specifications and both prices are grouped together because
+a larger cost-optimized CX plan can be cheaper than a smaller regular-performance
+CPX plan. The dialog also shows the automatic fallback order. Simple-mode members do not make infrastructure
 size decisions; the same configured order is applied automatically.
 
 The Nextcloud agent stops AIO, checks that used swap fits in available memory,
