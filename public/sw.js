@@ -1,5 +1,5 @@
 'use strict';
-const VERSION='20260925-hpb-keep-disk-3';
+const VERSION='20260925-hpb-keep-disk-4';
 const CACHE='enoch-static-'+VERSION;
 const ASSETS=[
   '/manifest.webmanifest',
