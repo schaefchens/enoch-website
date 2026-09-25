@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 require dirname(__DIR__).'/vendor/autoload.php';
-use Enoch\{Activity,ActivityMonitor,Auth,Cloud,Config,Engine,Host,ScheduledJobs,Scheduler,Store};
+use Enoch\{Activity,ActivityMonitor,Auth,Cloud,CloudRejected,Config,Engine,Host,Lifecycle,ScheduledJobs,Scheduler,Store};
 $checks=0;
 function check(bool $value,string $label):void{global $checks;if(!$value)throw new RuntimeException('FAIL: '.$label);$checks++;echo "PASS $label\n";}
 function refuses(callable $fn):bool{try{$fn();return false;}catch(Throwable){return true;}}
@@ -9,12 +9,20 @@ final class FakeCloud extends Cloud {
     public array $servers=[],$images=[],$calls=[];
     public int $nextImageId=21;
     public bool $missingInitial=false,$unsafeIP=false,$loseSnapshotResponse=false,$loseCreateResponse=false,$rejectSnapshot=false;
+    public int $capacityRejects=0;
+    public ?string $rejectCreateCode=null;
+    public array $unavailableTypes=[];
     public function __construct(public array $cfg){parent::__construct('fake');}
     public function seed(string $state='running'):array {
         $s=['id'=>10,'name'=>$this->cfg['name'],'status'=>$state,'labels'=>[],'image'=>['id'=>$this->cfg['initial_image']], 'public_net'=>['ipv4'=>['id'=>$this->cfg['ipv4'],'ip'=>'192.0.2.1'],'ipv6'=>['id'=>$this->cfg['ipv6']]],'server_type'=>['name'=>$this->cfg['type']]];
         $this->servers=[$s];return $s;
     }
     public function image(array $labels=[]):array{return ['id'=>20,'description'=>'test-current','created'=>'2026-09-22T00:00:00Z','type'=>'snapshot','status'=>'available','created_from'=>['id'=>10],'architecture'=>'x86','disk_size'=>40,'protection'=>['delete'=>false],'labels'=>$this->cfg['labels']+$labels];}
+    private function type(string $name):array {
+        $specs=['cx23'=>[2,4,40,0.010472,6.5331,'CX 23','cost_optimized'],'cpx12'=>[1,2,40,0.021896,13.6731,'CPX 12','regular_purpose'],'cpx22'=>[2,4,80,0.037128,23.1931,'CPX 22','regular_purpose'],'cx53'=>[16,32,320,0.056287,35.0931,'CX 53','cost_optimized']];
+        [$cores,$memory,$disk,$hourly,$monthly,$description,$category]=$specs[$name]??[2,4,40,0.01,7.00,strtoupper($name),'cost_optimized'];
+        return ['name'=>$name,'description'=>$description,'category'=>$category,'cores'=>$cores,'memory'=>$memory,'architecture'=>'x86','disk'=>$disk,'storage_type'=>'local','cpu_type'=>'shared','deprecated'=>false,'locations'=>[['name'=>'fsn1','available'=>!in_array($name,$this->unavailableTypes,true),'deprecation'=>null]],'prices'=>[['location'=>'fsn1','price_hourly'=>['gross'=>(string)$hourly],'price_monthly'=>['gross'=>(string)$monthly]]]];
+    }
     public function request(string $method,string $path,?array $body=null):array{
         if($method!=='GET')$this->calls[]=[$method,$path,$body];
         if($method==='GET'){
@@ -27,11 +35,14 @@ final class FakeCloud extends Cloud {
                 return ['images'=>$images];
             }
             if(str_starts_with($base,'/images/')){if((int)basename($base)===$this->cfg['initial_image']&&!$this->missingInitial){$i=$this->image();$i['id']=$this->cfg['initial_image'];$i['description']='test-initial';$i['protection']=['delete'=>true];return ['image'=>$i];}foreach($this->images as $i)if($i['id']===(int)basename($base))return ['image'=>$i];return ['not_found'=>true];}
-            if($base==='/server_types')return ['server_types'=>[['name'=>$q['name']??$this->cfg['type'],'architecture'=>'x86','disk'=>($q['name']??'')==='cx53'?320:40]]];
+            if($base==='/server_types')return ['server_types'=>isset($q['name'])?[$this->type($q['name'])]:array_map($this->type(...),array_values(array_unique([...($this->cfg['types']??[$this->cfg['type']]),'cpx22','cx53'])))];
             if(str_starts_with($base,'/firewalls/'))return ['firewall'=>['id'=>1]];
         }
         if($method==='POST'&&$path==='/servers'){
+            if($this->capacityRejects>0){$this->capacityRejects--;throw new CloudRejected(422,'resource_unavailable','Hetzner returned HTTP 422 (resource_unavailable).');}
+            if($this->rejectCreateCode!==null)throw new CloudRejected(422,$this->rejectCreateCode,'Hetzner returned HTTP 422 ('.$this->rejectCreateCode.').');
             $s=$this->seed();$this->servers[0]['labels']=$body['labels'];
+            $this->servers[0]['server_type']['name']=$body['server_type'];
             $this->servers[0]['image']=['id'=>(int)$body['image']];
             if($this->loseCreateResponse)throw new RuntimeException('Lost create response');
             return ['server'=>$this->servers[0]];
@@ -104,6 +115,21 @@ try{
     check($j['status']==='done'&&count($c->calls)===1,'lost create response reconciles using job label and pinned IPs');
     check($c->calls[0][2]['public_net']['ipv4']===$config->services['nextcloud']['ipv4'],'restore uses the persistent addresses');
     check(str_contains($c->calls[0][2]['user_data'],'enoch-activity-heartbeat.timer')&&str_contains($c->calls[0][2]['user_data'],'activity.php')&&!str_contains($c->calls[0][2]['user_data'],str_repeat('c',64)),'restore installs the activity timer without disclosing the scheduler key');
+    [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$c->capacityRejects=1;$e->enqueue('nextcloud','start','alice');for($n=0;$n<7;$n++)$j=tick($s,$c,$h);
+    $creates=array_values(array_filter($c->calls,fn($call)=>$call[0]==='POST'&&$call[1]==='/servers'));
+    check($j['status']==='done'&&array_column(array_column($creates,2),'server_type')===['cx23','cpx12'],'capacity rejection advances through the configured server type order');
+    check(($c->servers[0]['server_type']['name']??null)==='cpx12','fallback server type is preserved on the created VM');
+    [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$c->unavailableTypes=['cx23'];$e->enqueue('nextcloud','start','alice');for($n=0;$n<6;$n++)$j=tick($s,$c,$h);
+    $creates=array_values(array_filter($c->calls,fn($call)=>$call[0]==='POST'&&$call[1]==='/servers'));
+    check($j['status']==='done'&&array_column(array_column($creates,2),'server_type')===['cpx12'],'location availability skips a known-unavailable preferred type before creation');
+    [$s,$c,$h,$e]=fixture();$c->seed('off');$c->servers[0]['server_type']['name']='cpx12';$e->enqueue('nextcloud','start','alice');for($n=0;$n<4;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&array_column($c->calls,1)===['/servers/10/actions/poweron'],'default start powers on an existing automatically selected fallback type');
+    [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$c->rejectCreateCode='invalid_input';$e->enqueue('nextcloud','start','alice');$j=tick($s,$c,$h);
+    check($j['status']==='failed'&&count(array_filter($c->calls,fn($call)=>$call[1]==='/servers'))===1,'non-capacity create rejection never tries another server type');
+    [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$c->capacityRejects=2;$e->enqueue('nextcloud','start','alice');tick($s,$c,$h);$j=tick($s,$c,$h);
+    check($j['status']==='failed'&&str_contains($j['message'],'CX23, CPX12'),'exhausted fallback list reports every attempted server type');
+    [$s,$c]=fixture();$c->images=[$c->image()];$catalog=(new Lifecycle($c))->options($config->services['nextcloud']);$cx=array_values(array_filter($catalog['types'],fn($type)=>$type['name']==='cx23'))[0]??[];
+    check($catalog['fallback_types']===['cx23','cpx12']&&($cx['price_hourly']??null)===0.010472&&($cx['price_monthly']??null)===6.5331,'server options expose ordered fallbacks and current hourly and monthly prices');
     [$s,$c,$h,$e]=fixture('hpb');$c->seed();$e->enqueue('hpb','stop','alice');for($n=0;$n<10;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&!$h->commands,'HPB lifecycle is independent of Nextcloud');
     [$s,$c,$h,$e]=fixture();$auth=new Auth($config,$s);$auth->addUser('alice','test-password-long','operator');

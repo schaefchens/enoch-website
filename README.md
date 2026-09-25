@@ -34,9 +34,9 @@ cron tick, and lifecycle work always has priority.
 
 ## Server lifecycle
 
-`config/services.php` is the explicit service catalog. Each service pins both persistent Primary IP IDs, firewall, location, server type, snapshot labels, and health endpoint. Add further servers using the same structure. There is no arbitrary command runner or browser-supplied API resource ID.
+`config/services.php` is the explicit service catalog. Each service pins both persistent Primary IP IDs, firewall, location, an ordered `types` list, snapshot labels, and health endpoint. `type` remains the preferred/default size and must be the first list entry. Add further servers using the same structure. There is no arbitrary command runner or browser-supplied API resource ID.
 
-- **Start:** restore the latest available managed snapshot, or power on an existing VM; wait across ticks for service health. Provider capacity is required and there is no automatic upgrade to a more expensive type.
+- **Start:** restore the latest available managed snapshot, or power on an existing VM; wait across ticks for service health. Types marked unavailable in the service location are skipped. If Hetzner rejects creation with `resource_unavailable` or `placement_error`, the next configured compatible type is tried on the next worker tick. Validation, authorization, resource-limit and ambiguous transport failures never trigger a different size. A technical size selection is tried first, followed by the service list.
 - **Save & stop:** prepare the application, gracefully shut down the VM, create and verify a snapshot from that exact VM, recheck IP retention and snapshot ownership, then delete the powered-off VM. Never force power-off or delete after an unverified snapshot.
 - Snapshot writes and VM creation carry a unique job label. An interrupted/ambiguous API call is reconciled by observed state, never blindly repeated.
 - Primary IPs and snapshots remain allocated and billable. The initial image and protected checkpoints are retained; only superseded unprotected current images are pruned.
@@ -194,6 +194,10 @@ replace the current image with such an image. For a temporary large HPB instance
 turn off snapshot saving; the previous current image remains compatible with the
 smaller VM. Discarding changes is clearly confirmed again at shutdown, including
 in the simple interface. Other services are never implicitly started or stopped.
+The start dialog shows the selected type's full CPU, memory, disk, architecture,
+location availability, hourly gross price and 24/7 monthly billing maximum. It also
+shows the automatic fallback order. Simple-mode members do not make infrastructure
+size decisions; the same configured order is applied automatically.
 
 The Nextcloud agent stops AIO, checks that used swap fits in available memory,
 disables and removes its managed swap files, and trims free blocks before VM

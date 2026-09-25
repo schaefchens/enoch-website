@@ -17,8 +17,9 @@ class Cloud {
         $data=json_decode($raw,true);
         if($status===404&&$method==='GET')return ['not_found'=>true];
         if($status<200||$status>=300){
-            $message='Hetzner returned HTTP '.$status.' ('.preg_replace('/[^a-z0-9_]/i','',(string)($data['error']['code']??'request_failed')).').';
-            if($status>=400&&$status<500)throw new CloudRejected($message);
+            $code=preg_replace('/[^a-z0-9_]/i','',(string)($data['error']['code']??'request_failed'));
+            $message='Hetzner returned HTTP '.$status.' ('.$code.').';
+            if($status>=400&&$status<500)throw new CloudRejected($status,$code,$message);
             throw new \RuntimeException($message);
         }
         if(!is_array($data))throw new \RuntimeException('Hetzner returned an invalid response.');

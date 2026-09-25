@@ -13,6 +13,8 @@ return [
         'initial_image' => 434940917,
         'credential_fields' => ['admin_user'=>'Administrator username','admin_password'=>'Initial administrator password'],
         'name' => 'wolke2', 'aliases' => ['wolke2.schaefchens.de'], 'location' => 'fsn1', 'type' => 'cx23',
+        // Ordered, automatic capacity fallbacks. Keep the disk size equal so saved snapshots remain reversible.
+        'types' => ['cx23', 'cpx12'],
         'ipv4' => 150948650, 'ipv6' => 150948651, 'firewall' => 11663891, 'ssh_keys' => [100740697],
         'labels' => ['service' => 'nextcloud-aio', 'instance' => 'wolke2', 'lifecycle' => 'managed'],
         'prepare' => 'aio', 'ready_url' => 'https://wolke2.schaefchens.de/status.php', 'ready_kind' => 'nextcloud',
@@ -28,6 +30,7 @@ return [
         'initial_image' => 430318286,
         'credential_fields' => ['wolke_secret'=>'Signaling secret · wolke','wolke2_secret'=>'Signaling secret · wolke2','turn_secret'=>'TURN secret'],
         'name' => 'hpb', 'aliases' => ['hpb.schaefchens.de'], 'location' => 'fsn1', 'type' => 'cpx12',
+        'types' => ['cpx12', 'cx23'],
         'ipv4' => 97117715, 'ipv6' => 97117717, 'firewall' => 11602103, 'ssh_keys' => [100740697],
         'labels' => ['service' => 'nextcloud-talk-hpb', 'lifecycle' => 'managed'],
         'prepare' => null, 'ready_url' => 'https://hpb.schaefchens.de/api/v1/welcome', 'ready_kind' => 'hpb',

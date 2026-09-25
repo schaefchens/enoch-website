@@ -164,9 +164,28 @@ dialog { max-width: 570px; width: calc(100% - 32px); max-height: calc(100dvh - 4
 dialog::backdrop { background: #172c40a6; backdrop-filter: blur(3px); }
 dialog h2 { font: 400 33px/1.25 Georgia, serif; margin-bottom: 20px; }
 dialog > p:not(.eyebrow) { font-size: 18px; color: #4f6056; }
+#confirm { max-width: 760px; }
 #account-dialog { max-width: 760px; }
 .dialog-close { float: right; display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; border: 0; background: none; color: #616751; font-size: 29px; margin: -12px -12px 0 10px; }
 .confirm-note { border: 1px solid #ded1ad; border-radius: 7px; padding: 16px 18px; background: #f0ead9; color: #60522c; font-size: 16px; line-height: 1.65; }
+.type-details { margin: 12px 0 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.type-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 20px 22px; border-bottom: 1px solid var(--line); }
+.type-heading div > span { display: block; color: var(--muted); font-size: 13px; font-weight: 750; letter-spacing: .8px; text-transform: uppercase; }
+.type-heading strong { display: block; margin: 3px 0 1px; font-size: 23px; }
+.type-heading small { display: block; }
+.type-spec-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); margin: 0; padding: 4px 12px; }
+.type-spec-grid div { min-width: 0; padding: 14px 10px; }
+.type-spec-grid dt { color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; }
+.type-spec-grid dd { margin: 3px 0 0; color: var(--ink); font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
+.price-note { margin: 0; padding: 0 22px 18px; color: var(--muted); font-size: 14px; }
+.fallback-order { padding: 18px 22px 20px; border-top: 1px solid var(--line); background: #f4f0e5; }
+.fallback-order > strong { font-size: 16px; }
+.fallback-order ol { display: grid; gap: 8px; margin: 12px 0; padding-left: 28px; }
+.fallback-order li { padding-left: 4px; }
+.fallback-order li span { font-weight: 650; }
+.fallback-order li small { display: inline; margin-left: 9px; }
+.fallback-order li em { display: inline-block; margin-left: 9px; color: #8b3f2d; font-size: 13px; font-style: normal; font-weight: 650; }
+.fallback-order p { margin: 0; color: var(--muted); font-size: 14px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 28px; }
 .login { display: grid; grid-template-columns: 1fr 1fr; min-height: 100vh; }
 .login-story { background: var(--blue); color: #f5ecd5; padding: 55px 65px; display: flex; flex-direction: column; justify-content: space-between; gap: 60px; }
@@ -266,6 +285,10 @@ body[data-mode=simple] .content { max-width: 1210px; }
   dialog h2 { font-size: 29px; }
   .dialog-actions { flex-wrap: wrap; }
   .dialog-actions button { flex: 1; }
+  .type-spec-grid { grid-template-columns: 1fr 1fr; }
+  .type-heading { padding: 18px; }
+  .fallback-order { padding: 17px 18px; }
+  .fallback-order li small { display: block; margin-left: 0; }
   .view-options, .form-pair { grid-template-columns: 1fr; }
   .form-pair { gap: 0; }
   .permission-row { grid-template-columns: 1fr 1fr; padding: 15px; gap: 7px 15px; }
@@ -317,6 +340,7 @@ body[data-mode=simple] .content { max-width: 1210px; }
 [data-effective-theme=dark] .error, [data-effective-theme=dark] .badge.problem { background:#4b302c; color:#ffd6c5; border-color:#a47766; }
 [data-effective-theme=dark] .notice:not(.error) { background:#304531; color:#dbeaca; border-color:#7a9067; }
 [data-effective-theme=dark] input, [data-effective-theme=dark] select { background:#17292f; color:var(--ink); border-color:#87928a; }
+[data-effective-theme=dark] .fallback-order { background:#29373a; }
 [data-effective-theme=dark] label, [data-effective-theme=dark] .member-access, [data-effective-theme=dark] dialog > p:not(.eyebrow) { color:var(--ink); }
 [data-effective-theme=dark] th, [data-effective-theme=dark] input[readonly] { background:#2c3b3e; color:var(--ink); }
 [data-effective-theme=dark] td, [data-effective-theme=dark] .card-footer, [data-effective-theme=dark] .user-row, [data-effective-theme=dark] .timeline article { border-color:var(--line); }

@@ -56,25 +56,37 @@ final class Engine {
             $this->cloud->ips($cfg,$s);
             if($j['operation']==='start') {
                 if($s){
-                    if(($options['source']??'current')!=='current'||($options['type']??$cfg['type'])!==($s['server_type']['name']??$cfg['type'])||($options['save_snapshot']??true)===false)throw new \RuntimeException('Stop the existing VM before selecting a different restore profile.');
+                    $typeChanged=!empty($options['_type_explicit'])&&($options['type']??$cfg['type'])!==($s['server_type']['name']??$cfg['type']);
+                    if(($options['source']??'current')!=='current'||$typeChanged||($options['save_snapshot']??true)===false)throw new \RuntimeException('Stop the existing VM before selecting a different restore profile.');
                     if($s['status']==='running'){$this->advance($j,'ready','Checking service health',['server'=>$s['id']]);return;}
                     if($s['status']!=='off')throw new \RuntimeException('Server is busy. Wait for it to settle before starting.');
                     $this->advance($j,'powering','Powering on',['server'=>$s['id']]);
                     $this->cloud->request('POST','/servers/'.$s['id'].'/actions/poweron');return;
                 }
-                $options=$life->normalize($options,'start',$cfg);
-                $image=$life->restore($cfg,$options);
+                if(isset($j['data']['type_candidates'],$j['data']['type_index'],$j['data']['image'])){
+                    $types=$j['data']['type_candidates'];$typeIndex=(int)$j['data']['type_index'];
+                    $image=$this->cloud->request('GET','/images/'.$j['data']['image'])['image']??[];$this->cloud->imageValid($image,$cfg);
+                }else{
+                    $plan=$life->restorePlan($cfg,$options);$image=$plan['image'];$types=$plan['types'];$typeIndex=0;
+                }
+                $type=$types[$typeIndex]??throw new \RuntimeException('No compatible server type remains in the fallback list.');
                 $firewall=$this->cloud->request('GET','/firewalls/'.$cfg['firewall']);
                 if(!isset($firewall['firewall']))throw new \RuntimeException('Configured firewall is missing.');
                 $userData=Provision::cloudInit($this->config,$cfg,$j['service']);
-                $this->advance($j,'creating','Restoring the selected snapshot',['image'=>$image['id'],'save_snapshot'=>$options['save_snapshot']]);
-                $r=$this->cloud->request('POST','/servers',[
-                    'name'=>$cfg['name'],'server_type'=>$options['type'],'location'=>$cfg['location'],'image'=>$image['id'],
-                    'ssh_keys'=>$cfg['ssh_keys'],'firewalls'=>[['firewall'=>$cfg['firewall']]],
-                    'public_net'=>['enable_ipv4'=>true,'enable_ipv6'=>true,'ipv4'=>$cfg['ipv4'],'ipv6'=>$cfg['ipv6']],
-                    'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'enoch-save'=>$options['save_snapshot']?'yes':'no','enoch-source'=>(string)$image['id']], 'start_after_create'=>true,
-                    'user_data'=>$userData,
-                ]);
+                $this->advance($j,'creating','Restoring the selected snapshot on '.strtoupper($type),['image'=>$image['id'],'save_snapshot'=>$options['save_snapshot'],'type_candidates'=>$types,'type_index'=>$typeIndex,'server_type'=>$type]);
+                try{$r=$this->cloud->request('POST','/servers',[
+                        'name'=>$cfg['name'],'server_type'=>$type,'location'=>$cfg['location'],'image'=>$image['id'],
+                        'ssh_keys'=>$cfg['ssh_keys'],'firewalls'=>[['firewall'=>$cfg['firewall']]],
+                        'public_net'=>['enable_ipv4'=>true,'enable_ipv6'=>true,'ipv4'=>$cfg['ipv4'],'ipv6'=>$cfg['ipv6']],
+                        'labels'=>$cfg['labels']+['enoch-job'=>$j['id'],'enoch-save'=>$options['save_snapshot']?'yes':'no','enoch-source'=>(string)$image['id'],'enoch-type'=>$type], 'start_after_create'=>true,
+                        'user_data'=>$userData,
+                    ]);
+                }catch(CloudRejected $e){
+                    if(!$e->isCapacityUnavailable())throw $e;
+                    $next=$typeIndex+1;
+                    if(!isset($types[$next])){$this->advance($j,'failed','Hetzner has no capacity for the configured server types: '.strtoupper(implode(', ',$types)).'.',[],'failed');return;}
+                    $this->advance($j,'queued',strtoupper($type).' has no capacity; trying '.strtoupper($types[$next]),['type_index'=>$next,'server_type'=>$types[$next]]);return;
+                }
                 if(isset($r['server']['id']))$this->advance($j,'creating','Waiting for the restored VM',['server'=>$r['server']['id']]);return;
             }
             if(!$s){$this->done($j,'Already stopped; no VM is allocated');return;}
