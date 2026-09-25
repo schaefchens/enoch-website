@@ -50,8 +50,12 @@ final class Lifecycle {
             $price=null;foreach($t['prices']??[] as $candidate)if(($candidate['location']??null)===$cfg['location']){$price=$candidate;break;}
             $types[]=['name'=>$t['name'],'description'=>$t['description']??strtoupper($t['name']),'category'=>$t['category']??null,'cores'=>$t['cores'],'memory'=>$t['memory'],'disk'=>$t['disk'],'cpu_type'=>$t['cpu_type']??null,'architecture'=>$t['architecture'],'storage_type'=>$t['storage_type']??'local','available'=>$location['available']??null,'price_hourly'=>isset($price['price_hourly']['gross'])?(float)$price['price_hourly']['gross']:null,'price_monthly'=>isset($price['price_monthly']['gross'])?(float)$price['price_monthly']['gross']:null];
         }
-        usort($types,fn($a,$b)=>($a['memory']<=>$b['memory'])?:strcmp($a['name'],$b['name']));
-        return ['initial'=>$this->summary($initial),'current'=>$this->summary($current),'checkpoints'=>array_map($this->summary(...),$this->checkpoints($cfg)),'types'=>$types,'default_type'=>$cfg['type'],'fallback_types'=>array_values(array_unique($cfg['types']??[$cfg['type']])),'location'=>$cfg['location'],'currency'=>'EUR'];
+        $fallbacks=array_values(array_unique($cfg['types']??[$cfg['type']]));$priority=array_flip($fallbacks);
+        usort($types,static function(array $a,array $b)use($priority):int{
+            $aPriority=$priority[$a['name']]??PHP_INT_MAX;$bPriority=$priority[$b['name']]??PHP_INT_MAX;
+            return ($aPriority<=>$bPriority)?:($a['memory']<=>$b['memory'])?:strcmp($a['name'],$b['name']);
+        });
+        return ['initial'=>$this->summary($initial),'current'=>$this->summary($current),'checkpoints'=>array_map($this->summary(...),$this->checkpoints($cfg)),'types'=>$types,'default_type'=>$cfg['type'],'fallback_types'=>$fallbacks,'location'=>$cfg['location'],'currency'=>'EUR'];
     }
     public function normalize(array $options,string $operation,array $cfg):array {
         if(array_diff(array_keys($options),['source','type','save_snapshot','checkpoint_name','acknowledge_discard','acknowledge_large_disk']))throw new \RuntimeException('Unknown lifecycle option.');
