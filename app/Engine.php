@@ -5,7 +5,7 @@ namespace Enoch;
 final class Engine {
     public function __construct(private Config $config,private Store $store,private Cloud $cloud,private Host $host) {}
     public function enqueue(string $service,string $operation,string $actor,array $options=[]): string {
-        if(!isset($this->config->services[$service])||!in_array($operation,['start','stop'],true))throw new \RuntimeException('Unknown service or operation.');
+        if(!isset($this->config->services[$service])||!in_array($operation,['start','stop','terminate'],true))throw new \RuntimeException('Unknown service or operation.');
         $options=(new Lifecycle($this->cloud))->normalize($options,$operation,$this->config->services[$service]);
         $id=bin2hex(random_bytes(12));$now=time();
         try{$this->store->query("INSERT INTO jobs(id,service,operation,status,phase,phase_since,created,updated,actor,message,data) VALUES(?,?,?,'active','queued',?,?,?,?,?,?)",[$id,$service,$operation,$now,$now,$now,$actor,'Waiting to begin',json_encode(['options'=>$options],JSON_THROW_ON_ERROR)]);}
@@ -17,7 +17,19 @@ final class Engine {
         $this->store->query('UPDATE jobs SET phase=?,status=?,phase_since=?,updated=?,message=?,data=? WHERE id=?',[$phase,$status,time(),time(),$message,json_encode($job['data'],JSON_THROW_ON_ERROR),$job['id']]);
         $this->store->audit($job['actor'],$message,$job['service'].' · '.$job['id']);
     }
-    private function done(array &$j,string $message):void{if($j['operation']==='start')$this->store->set('activity:grace:'.$j['service'],time());$this->advance($j,'done',$message,[],'done');}
+    private function done(array &$j,string $message):void{
+        if($j['operation']==='start')$this->store->set('activity:grace:'.$j['service'],time());
+        $this->store->set('lifecycle:block:'.$j['service'],null);
+        $this->advance($j,'done',$message,[],'done');
+    }
+    private function fail(array &$j,string $message):void {
+        if($j['operation']==='stop'){
+            $server=$j['data']['server']??null;
+            if(!$server)try{$server=$this->cloud->server($this->config->services[$j['service']])['id']??null;}catch(\Throwable){}
+            if($server)$this->store->set('lifecycle:block:'.$j['service'],['server'=>(int)$server,'job'=>$j['id'],'message'=>$message,'time'=>time()]);
+        }
+        $this->advance($j,'failed',$message,[],'failed');
+    }
     // At most one phase per request; no sleep loops and no replay of ambiguous mutations.
     public function tick(): array {
         return $this->store->locked(function(){
@@ -32,9 +44,9 @@ final class Engine {
             catch(\Throwable $e){
                 // An intent is durable before every cloud write. Its next phase reconciles
                 // observed state, including when PHP died before saving an API response.
-                if(!$e instanceof CloudRejected&&in_array($j['phase'],['creating','resizing','powering','shutting-down','snapshotting','protecting','deleting'],true)&&time()-(int)$j['phase_since']<120){
+                if(!$e instanceof CloudRejected&&in_array($j['phase'],['creating','resizing','powering','shutting-down','force-powering-off','snapshotting','protecting','deleting'],true)&&time()-(int)$j['phase_since']<120){
                     $this->store->query('UPDATE jobs SET message=? WHERE id=?',['Checking the result of a cloud request before continuing.',$j['id']]);
-                }else{$this->advance($j,'failed',$e->getMessage(),[],'failed');}
+                }else{$this->fail($j,$e->getMessage());}
             }
             return ['work'=>true,'job'=>$j['id']];
         })??['busy'=>true];
@@ -94,7 +106,15 @@ final class Engine {
                 }
                 if(isset($r['server']['id']))$this->advance($j,'creating','Waiting for the restored VM',['server'=>$r['server']['id']]);return;
             }
-            if(!$s){$this->done($j,'Already stopped; no VM is allocated');return;}
+            if(!$s){$this->done($j,$j['operation']==='terminate'?'No VM is allocated':'Already stopped; no VM is allocated');return;}
+            if($j['operation']==='terminate'){
+                $fallback=$life->current($cfg);$this->cloud->imageValid($fallback,$cfg);
+                $data=['server'=>$s['id'],'save_snapshot'=>false,'fallback'=>$fallback['id'],'image'=>$fallback['id']];
+                if($s['status']==='off'){$this->advance($j,'delete','VM is off; previous snapshot verified',$data);return;}
+                if($s['status']!=='running')throw new \RuntimeException('Server is busy. Wait for it to settle before forcing termination.');
+                $this->advance($j,'force-powering-off','Forcing VM power off; no new snapshot will be created',$data);
+                $this->cloud->request('POST','/servers/'.$s['id'].'/actions/poweroff');return;
+            }
             $save=$options['save_snapshot']??(($s['labels']['enoch-save']??'yes')!=='no');
             if(!$save&&empty($options['acknowledge_discard']))throw new \RuntimeException('This server is configured to discard changes. Confirm this before stopping.');
             $data=['server'=>$s['id'],'save_snapshot'=>$save];
@@ -167,6 +187,10 @@ final class Engine {
             if(!$s)throw new \RuntimeException('Server disappeared before the snapshot.');
             if($s['status']==='off')$this->advance($j,'snapshot','VM is off; preparing a snapshot');
             elseif($age>1800)throw new \RuntimeException('Graceful shutdown was not confirmed. No forced power-off or deletion was attempted.');return;
+        case 'force-powering-off':
+            if(!$s){$this->done($j,'VM terminated; previous snapshots retained');return;}
+            if($s['status']==='off'){$this->advance($j,'delete','Forced power-off confirmed; previous snapshot verified');return;}
+            if($age>300)throw new \RuntimeException('Forced power-off was not confirmed. The VM was not deleted.');return;
         case 'snapshot':
             if(!$s||$s['status']!=='off')throw new \RuntimeException('A snapshot requires the original VM to be powered off.');
             $this->cloud->ips($cfg,$s);
@@ -215,7 +239,7 @@ final class Engine {
             $this->advance($j,'deleting','Releasing VM; keeping IPs and snapshots');
             $this->cloud->request('DELETE','/servers/'.$s['id']);return;
         case 'deleting':
-            if(!$s){if($save)$this->advance($j,'pruning','VM released; retaining current state and protected checkpoints');else $this->done($j,'Stopped without saving; previous snapshots retained');return;}
+            if(!$s){if($save)$this->advance($j,'pruning','VM released; retaining current state and protected checkpoints');else $this->done($j,$j['operation']==='terminate'?'VM terminated; previous snapshots retained':'Stopped without saving; previous snapshots retained');return;}
             if($age>300)throw new \RuntimeException('Deletion was not confirmed. The verified snapshot is retained. Inspect Hetzner before retrying.');return;
         case 'pruning':
             if(!$life->pruneOne($cfg,(int)$j['data']['image']))$this->done($j,isset($j['data']['checkpoint_name'])?'Protected checkpoint saved; server stopped':'Stopped and saved; initial, current and protected checkpoint snapshots retained');return;
@@ -227,7 +251,7 @@ final class Engine {
             $j=$this->store->query("SELECT * FROM jobs WHERE id=? AND status='active'",[$id])->fetch();
             if(!$j)throw new \RuntimeException('No active job to pause.');
             // Pause only future steps; already submitted cloud actions may still finish.
-            $j['data']=json_decode($j['data'],true);$this->advance($j,'failed','Paused by '.$actor.'; check cloud state before starting another operation',[],'failed');
+            $j['data']=json_decode($j['data'],true);$this->fail($j,'Paused by '.$actor.'; check cloud state before starting another operation');
         });
     }
     public function dashboard():array {
@@ -238,7 +262,13 @@ final class Engine {
         try{$servers=$this->cloud->all('servers');}catch(\Throwable $e){$servers=[];$serverError=$e;}
         foreach($this->config->services as $id=>$cfg){
             try{if($serverError)throw $serverError;$s=$this->cloud->server($cfg,$servers);$images=$this->cloud->images($cfg);$latest=null;foreach($images as $image)if($image['status']==='available'){$latest=$image;break;}$checkpoints=count(array_filter($images,fn($image)=>(($image['labels']['enoch-kind']??'')==='checkpoint'&&!empty($image['protection']['delete']))));
-                $cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>$s['status']??'saved','type'=>$s['server_type']['name']??$cfg['type'],'location'=>$cfg['location'],'ip'=>$s['public_net']['ipv4']['ip']??null,'save_snapshot'=>($s['labels']['enoch-save']??'yes')!=='no','snapshot'=>$latest?['id'=>$latest['id'],'created'=>$latest['created'],'size'=>$latest['image_size']??null,'disk'=>$latest['disk_size']]:null,'initial_image'=>$cfg['initial_image'],'snapshots'=>count($images)+((!in_array($cfg['initial_image'],array_column($images,'id'),true))?1:0),'checkpoints'=>$checkpoints,'error'=>null];
+                $block=$this->store->get('lifecycle:block:'.$id);
+                if($s&&!is_array($block)){
+                    $failed=$this->store->query("SELECT id,message,data,updated FROM jobs WHERE service=? AND operation='stop' AND status='failed' ORDER BY created DESC LIMIT 1",[$id])->fetch();
+                    if($failed){$failedData=json_decode($failed['data'],true);if((int)($failedData['server']??0)===(int)$s['id']){$block=['server'=>(int)$s['id'],'job'=>$failed['id'],'message'=>$failed['message'],'time'=>(int)$failed['updated']];$this->store->set('lifecycle:block:'.$id,$block);}}
+                }
+                $recovery=$s&&is_array($block)&&(int)($block['server']??0)===(int)$s['id']?$block:null;
+                $cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>$s['status']??'saved','type'=>$s['server_type']['name']??$cfg['type'],'location'=>$cfg['location'],'ip'=>$s['public_net']['ipv4']['ip']??null,'save_snapshot'=>($s['labels']['enoch-save']??'yes')!=='no','snapshot'=>$latest?['id'=>$latest['id'],'created'=>$latest['created'],'size'=>$latest['image_size']??null,'disk'=>$latest['disk_size']]:null,'initial_image'=>$cfg['initial_image'],'snapshots'=>count($images)+((!in_array($cfg['initial_image'],array_column($images,'id'),true))?1:0),'checkpoints'=>$checkpoints,'recovery'=>$recovery,'error'=>null];
             }catch(\Throwable $e){$cards[]=['id'=>$id,'title'=>$cfg['title'],'subtitle'=>$cfg['subtitle'],'description'=>$cfg['description'],'domain'=>$cfg['domain'],'state'=>'unknown','error'=>$e->getMessage()];}
         }
         $result=['checked'=>time(),'services'=>$cards];$this->store->set('dashboard',$result);return $result;

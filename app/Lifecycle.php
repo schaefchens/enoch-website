@@ -63,6 +63,10 @@ final class Lifecycle {
         return ['initial'=>$this->summary($initial),'current'=>$this->summary($current),'checkpoints'=>array_map($this->summary(...),$this->checkpoints($cfg)),'types'=>$types,'default_type'=>$cfg['type'],'fallback_types'=>$fallbacks,'location'=>$cfg['location'],'currency'=>'EUR'];
     }
     public function normalize(array $options,string $operation,array $cfg):array {
+        if($operation==='terminate'){
+            if(array_diff(array_keys($options),['acknowledge_discard'])||($options['acknowledge_discard']??null)!==true)throw new \RuntimeException('Confirm that the current VM will be terminated without creating a snapshot.');
+            return ['acknowledge_discard'=>true,'save_snapshot'=>false];
+        }
         if(array_diff(array_keys($options),['source','type','save_snapshot','checkpoint_name','acknowledge_discard','acknowledge_large_disk']))throw new \RuntimeException('Unknown lifecycle option.');
         $explicitType=array_key_exists('type',$options);
         if($operation==='stop'&&(isset($options['type'])||isset($options['source'])))throw new \RuntimeException('Restore options only apply when starting.');

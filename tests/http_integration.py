@@ -30,12 +30,12 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
    except OSError:time.sleep(.05)
   assert status==200 and b'Set up your workspace' in body
   assert 'frame-ancestors' in headers['Content-Security-Policy']
-  assert b'rel="manifest" href="/manifest.webmanifest"' in body and b'name="app-version" content="20260925-pwa-1"' in body
+  assert b'rel="manifest" href="/manifest.webmanifest"' in body and b'name="app-version" content="20261022-shutdown-recovery-1"' in body
   assert b'class="preferences"' not in body and b'1 Corinthians 16:14' not in body
   status,manifest,_=request('/manifest.webmanifest');manifest=json.loads(manifest)
   assert status==200 and manifest['display']=='standalone' and {icon['sizes'] for icon in manifest['icons']}=={'192x192','512x512'}
-  status,version,_=request('/version.php');assert status==200 and json.loads(version)['version']=='20260925-pwa-1'
-  status,worker,_=request('/sw.js');assert status==200 and b"const VERSION='20260925-pwa-1'" in worker and b"url.pathname.startsWith('/assets/')" in worker
+  status,version,_=request('/version.php');assert status==200 and json.loads(version)['version']=='20261022-shutdown-recovery-1'
+  status,worker,_=request('/sw.js');assert status==200 and b"const VERSION='20261022-shutdown-recovery-1'" in worker and b"url.pathname.startsWith('/assets/')" in worker
   assert request('/assets/icon-192.png')[0]==200 and request('/assets/icon-512.png')[0]==200 and request('/assets/apple-touch-icon.png')[0]==200
   assert request('/api.php')[0]==401
   token=re.search(rb'name="csrf" value="([^"]+)"',body).group(1).decode()
@@ -48,6 +48,9 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   assert post('user',{'name':'testviewer','password':'a-viewer-test-password','role':'viewer'},token)[0]==200
   assert post('user',{'name':'testtech','password':'a-technical-test-password','role':'operator','ui_mode':'technical','permissions':{'nextcloud':{'view':True,'stop':True}}},token)[0]==200
   assert post('job',{'service':'unknown','operation':'stop'},token)[0]==400
+  assert post('job',{'service':'nextcloud','operation':'terminate','options':{}},token)[0]==400
+  status,body,_=post('job',{'service':'nextcloud','operation':'terminate','options':{'acknowledge_discard':True}},token);assert status==202
+  assert post('pause',{'id':json.loads(body)['id']},token)[0]==200
   assert post('cron-command',{},token)[0]==200
   assert post('save-credentials',{'service':'hpb','values':{'wolke_secret':'hidden-test-signaling'}},token)[0]==200
   assert b'hidden-test-signaling' in post('credentials',{'service':'hpb'},token)[1]
@@ -78,6 +81,7 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
   status,body,_=request('/');token=re.search(rb'name="csrf" value="([^"]+)"',body).group(1).decode()
   status,body,_=request('/',urllib.parse.urlencode(dict(csrf=token,name='testtech',password='a-technical-test-password')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
   token=re.search(rb'name="csrf-token" content="([^"]+)"',body).group(1).decode()
+  assert post('job',{'service':'nextcloud','operation':'terminate','options':{'acknowledge_discard':True}},token)[0]==403
   assert post('job',{'service':'nextcloud','operation':'stop','options':{'save_snapshot':False,'acknowledge_discard':True}},token)[0]==202
   assert post('job',{'service':'nextcloud','operation':'stop','options':{'checkpoint_name':'Forbidden checkpoint'}},token)[0]==403
   request('/',urllib.parse.urlencode(dict(csrf=token,action='logout')).encode(),{'Content-Type':'application/x-www-form-urlencoded'})

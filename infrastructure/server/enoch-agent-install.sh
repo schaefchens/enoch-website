@@ -3,9 +3,26 @@
 set -Eeuo pipefail
 [[ $(uname -s) == Linux && $EUID == 0 ]] || { echo 'Run as root on the Nextcloud Linux VM.' >&2; exit 1; }
 [[ $# == 1 && -r $1 ]] || { echo 'Usage: enoch-agent-install.sh /root/enoch.pub' >&2; exit 1; }
-[[ -x /usr/local/sbin/nextcloud-aio-stop-siblings ]] || { echo 'Install nextcloud_server_setup.sh first.' >&2; exit 1; }
 read -r KEY_TYPE KEY_DATA _ <"$1"
 [[ $KEY_TYPE == ssh-ed25519 && $KEY_DATA =~ ^[A-Za-z0-9+/=]+$ ]] || { echo 'An Ed25519 public key is required.' >&2; exit 1; }
+cat >/usr/local/sbin/nextcloud-aio-stop-siblings <<'AIO_STOP'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+docker inspect nextcloud-aio-nextcloud >/dev/null 2>&1 || exit 0
+REMAINING=$(docker ps --format '{{.Names}}' | grep '^nextcloud-aio-' | grep -Ev '^nextcloud-aio-(mastercontainer|domaincheck)$' || true)
+if [[ -z $REMAINING ]]; then
+    echo 'Nextcloud AIO sibling containers are already stopped.'
+    exit 0
+fi
+if [[ $(docker inspect --format '{{.State.Running}}' nextcloud-aio-mastercontainer) != true ]]; then
+    echo 'AIO mastercontainer is not running; cannot ensure a clean stop.' >&2
+    exit 1
+fi
+timeout 20m docker exec --env STOP_CONTAINERS=1 nextcloud-aio-mastercontainer /daily-backup.sh
+REMAINING=$(docker ps --format '{{.Names}}' | grep '^nextcloud-aio-' | grep -Ev '^nextcloud-aio-(mastercontainer|domaincheck)$' || true)
+[[ -z $REMAINING ]] || { printf 'AIO containers are still running:\n%s\n' "$REMAINING" >&2; exit 1; }
+AIO_STOP
+chmod 0755 /usr/local/sbin/nextcloud-aio-stop-siblings
 cat >/usr/local/sbin/enoch-swapfile <<'SWAP_PY'
 #!/usr/bin/env python3
 """Manage file-backed swap around an Enoch server snapshot.
@@ -251,11 +268,19 @@ systemctl daemon-reload
 /usr/local/sbin/enoch-swapfile register
 systemctl enable --now enoch-swapfile.service
 rm -f /usr/local/sbin/enoch-clear-swap
+cat >/usr/local/sbin/enoch-swapfile-failsafe <<'FAILSAFE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+STATE=$(systemctl is-system-running 2>/dev/null || true)
+[[ $STATE == running || $STATE == degraded ]] || exit 0
+exec /usr/local/sbin/enoch-swapfile ensure
+FAILSAFE
+chmod 0755 /usr/local/sbin/enoch-swapfile-failsafe
 cat >/usr/local/sbin/enoch-prepare-snapshot <<'PREP'
 #!/bin/bash
 set -Eeuo pipefail
 /usr/local/sbin/nextcloud-aio-stop-siblings
-systemd-run --quiet --on-active=30m /usr/local/sbin/enoch-swapfile ensure >/dev/null
+systemd-run --quiet --on-active=30m /usr/local/sbin/enoch-swapfile-failsafe >/dev/null
 /usr/local/sbin/enoch-swapfile prepare
 PREP
 chmod 0755 /usr/local/sbin/enoch-prepare-snapshot
@@ -269,7 +294,7 @@ def emit(state):
     print(json.dumps({'state': state})); sys.exit(0)
 command = os.environ.get('SSH_ORIGINAL_COMMAND', '')
 if command == 'probe':
-    required = ('/usr/local/sbin/nextcloud-aio-stop-siblings', '/usr/local/sbin/enoch-activity-heartbeat', '/usr/local/sbin/enoch-prepare-snapshot', '/usr/local/sbin/enoch-swapfile')
+    required = ('/usr/local/sbin/nextcloud-aio-stop-siblings', '/usr/local/sbin/enoch-activity-heartbeat', '/usr/local/sbin/enoch-prepare-snapshot', '/usr/local/sbin/enoch-swapfile', '/usr/local/sbin/enoch-swapfile-failsafe')
     emit('installed' if all(os.access(path, os.X_OK) for path in required) else 'failed')
 match = re.fullmatch(r'(prepare|status) ([a-f0-9]{24})', command)
 if not match:

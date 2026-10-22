@@ -50,6 +50,7 @@ final class FakeCloud extends Cloud {
         if(str_ends_with($path,'/poweron')){$this->servers[0]['status']='running';return ['action'=>['id'=>1]];}
         if(str_ends_with($path,'/change_type')){$this->servers[0]['server_type']['name']=$body['server_type'];if(!empty($body['upgrade_disk']))$this->servers[0]['primary_disk_size']=$this->type($body['server_type'])['disk'];return ['action'=>['id'=>5]];}
         if(str_ends_with($path,'/shutdown')){$this->servers[0]['status']='off';return ['action'=>['id'=>2]];}
+        if(str_ends_with($path,'/poweroff')){$this->servers[0]['status']='off';return ['action'=>['id'=>6]];}
         if(str_ends_with($path,'/create_image')){
             if($this->rejectSnapshot)throw new RuntimeException('Snapshot failed');
             $i=$this->image($body['labels']);$i['labels']=$body['labels'];$i['description']=$body['description'];$i['id']=$this->nextImageId++;$i['created']=gmdate('c',time()+$i['id']);$this->images[]=$i;
@@ -93,6 +94,14 @@ try{
     check(count($c->images)===1,'exactly one snapshot per operation');
     [$s,$c,$h,$e]=fixture();$c->seed();$h->state='failed';$e->enqueue('nextcloud','stop','alice');tick($s,$c,$h);$j=tick($s,$c,$h);
     check($j['status']==='failed'&&!$c->calls,'failed AIO stop does not shut down, snapshot or delete');
+    check(($s->get('lifecycle:block:nextcloud')['server']??null)===10,'failed stop opens a circuit breaker for the same VM');
+    $card=array_values(array_filter($e->dashboard()['services'],fn($service)=>$service['id']==='nextcloud'))[0];
+    check(($card['recovery']['server']??null)===10,'dashboard marks the failed VM as needing recovery instead of healthy');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];
+    check(refuses(fn()=>$e->enqueue('nextcloud','terminate','alice')),'force termination requires explicit discard acknowledgement');
+    $e->enqueue('nextcloud','terminate','alice',['acknowledge_discard'=>true]);for($n=0;$n<6;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&$c->servers===[]&&array_column($c->images,'id')===[20],'force termination keeps the last snapshot and creates no new one');
+    check(array_column($c->calls,1)===['/servers/10/actions/poweroff','/servers/10'],'force termination powers off before deleting the VM');
     [$s,$c,$h,$e]=fixture();$c->seed();$c->unsafeIP=true;$e->enqueue('nextcloud','stop','alice');$j=tick($s,$c,$h);
     check($j['status']==='failed'&&!$c->calls,'auto-delete primary IP blocks mutation');
     [$s,$c,$h,$e]=fixture();$c->seed();$c->servers[0]['public_net']['ipv4']['id']=999;$e->enqueue('nextcloud','stop','alice');$j=tick($s,$c,$h);
@@ -170,6 +179,9 @@ try{
     [$as,$ac,$ah,$ae]=fixture();$ac->seed();$ac->servers[0]['created']=gmdate('c',time()-4000);$as->set('activity:nextcloud',['last_seen'=>time()-4000]);
     (new ActivityMonitor($config,$as,$ac,$ae))->runDue();$automatic=$as->query("SELECT * FROM jobs WHERE status='active'")->fetch();
     check($automatic&&$automatic['operation']==='stop'&&$automatic['actor']==='automatic inactivity monitor','quiet running service queues the ordinary safe stop workflow');
+    [$as,$ac,$ah,$ae]=fixture();$ac->seed();$ac->servers[0]['created']=gmdate('c',time()-4000);$as->set('activity:nextcloud',['last_seen'=>time()-4000]);$as->set('lifecycle:block:nextcloud',['server'=>10,'message'=>'failed']);
+    (new ActivityMonitor($config,$as,$ac,$ae))->runDue();
+    check(!$as->query("SELECT 1 FROM jobs WHERE status='active'")->fetchColumn(),'activity monitor does not repeat a failed stop for the same VM');
     check($config->services['nextcloud']['idle_timeout']===$config->services['hpb']['idle_timeout'],'Nextcloud and HPB use the same inactivity interval');
     [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];$e->enqueue('nextcloud','stop','alice');for($n=0;$n<15;$n++)$j=tick($s,$c,$h);
     check($j['status']==='done'&&array_column($c->images,'id')===[21],'verified new snapshot replaces previous current snapshot');

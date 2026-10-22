@@ -187,6 +187,11 @@ cat >/usr/local/sbin/nextcloud-aio-stop-siblings <<'BASH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 docker inspect nextcloud-aio-nextcloud >/dev/null 2>&1 || exit 0
+REMAINING=$(docker ps --format '{{.Names}}' | grep '^nextcloud-aio-' | grep -Ev '^nextcloud-aio-(mastercontainer|domaincheck)$' || true)
+if [[ -z $REMAINING ]]; then
+    echo 'Nextcloud AIO sibling containers are already stopped.'
+    exit 0
+fi
 if [[ $(docker inspect --format '{{.State.Running}}' nextcloud-aio-mastercontainer) != true ]]; then
     echo 'AIO mastercontainer is not running; cannot ensure a clean stop.' >&2
     exit 1

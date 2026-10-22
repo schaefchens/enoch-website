@@ -12,7 +12,8 @@ try{
         $auth->csrf($_SERVER['HTTP_X_CSRF_TOKEN']??'');
         if($action==='job'){
             $service=(string)($input['service']??'');$operation=(string)($input['operation']??'');
-            $auth->access->requireOperation($user,$service,$operation);
+            if($operation==='terminate'){$auth->requireRole('admin');if(!isset($config->services[$service]))throw new RuntimeException('Unknown service or operation.');}
+            else $auth->access->requireOperation($user,$service,$operation);
             $options=$input['options']??[];
             if(!is_array($options))throw new RuntimeException('Invalid lifecycle options.');
             $advanced=array_diff(array_keys($options),['save_snapshot','acknowledge_discard','acknowledge_large_disk']);
