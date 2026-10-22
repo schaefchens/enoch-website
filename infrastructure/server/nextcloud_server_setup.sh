@@ -186,6 +186,7 @@ YAML
 cat >/usr/local/sbin/nextcloud-aio-stop-siblings <<'BASH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+[[ ! -e /run/enoch/snapshot-prepared ]] || { echo 'Enoch snapshot preparation already stopped Nextcloud AIO.'; exit 0; }
 docker inspect nextcloud-aio-nextcloud >/dev/null 2>&1 || exit 0
 REMAINING=$(docker ps --format '{{.Names}}' | grep '^nextcloud-aio-' | grep -Ev '^nextcloud-aio-(mastercontainer|domaincheck)$' || true)
 if [[ -z $REMAINING ]]; then
@@ -232,6 +233,7 @@ Before=shutdown.target reboot.target halt.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=-/usr/bin/rm -f /run/enoch/snapshot-prepared
 ExecStart=/usr/local/sbin/nextcloud-aio-start-siblings
 ExecStop=/usr/local/sbin/nextcloud-aio-stop-siblings
 TimeoutStartSec=25min

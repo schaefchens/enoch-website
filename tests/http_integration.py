@@ -30,12 +30,12 @@ with tempfile.TemporaryDirectory(prefix='enoch-http-') as tmp:
    except OSError:time.sleep(.05)
   assert status==200 and b'Set up your workspace' in body
   assert 'frame-ancestors' in headers['Content-Security-Policy']
-  assert b'rel="manifest" href="/manifest.webmanifest"' in body and b'name="app-version" content="20261022-shutdown-recovery-1"' in body
+  assert b'rel="manifest" href="/manifest.webmanifest"' in body and b'name="app-version" content="20261022-shutdown-recovery-2"' in body
   assert b'class="preferences"' not in body and b'1 Corinthians 16:14' not in body
   status,manifest,_=request('/manifest.webmanifest');manifest=json.loads(manifest)
   assert status==200 and manifest['display']=='standalone' and {icon['sizes'] for icon in manifest['icons']}=={'192x192','512x512'}
-  status,version,_=request('/version.php');assert status==200 and json.loads(version)['version']=='20261022-shutdown-recovery-1'
-  status,worker,_=request('/sw.js');assert status==200 and b"const VERSION='20261022-shutdown-recovery-1'" in worker and b"url.pathname.startsWith('/assets/')" in worker
+  status,version,_=request('/version.php');assert status==200 and json.loads(version)['version']=='20261022-shutdown-recovery-2'
+  status,worker,_=request('/sw.js');assert status==200 and b"const VERSION='20261022-shutdown-recovery-2'" in worker and b"url.pathname.startsWith('/assets/')" in worker
   assert request('/assets/icon-192.png')[0]==200 and request('/assets/icon-512.png')[0]==200 and request('/assets/apple-touch-icon.png')[0]==200
   assert request('/api.php')[0]==401
   token=re.search(rb'name="csrf" value="([^"]+)"',body).group(1).decode()

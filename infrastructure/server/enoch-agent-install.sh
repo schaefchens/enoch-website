@@ -8,6 +8,7 @@ read -r KEY_TYPE KEY_DATA _ <"$1"
 cat >/usr/local/sbin/nextcloud-aio-stop-siblings <<'AIO_STOP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+[[ ! -e /run/enoch/snapshot-prepared ]] || { echo 'Enoch snapshot preparation already stopped Nextcloud AIO.'; exit 0; }
 docker inspect nextcloud-aio-nextcloud >/dev/null 2>&1 || exit 0
 REMAINING=$(docker ps --format '{{.Names}}' | grep '^nextcloud-aio-' | grep -Ev '^nextcloud-aio-(mastercontainer|domaincheck)$' || true)
 if [[ -z $REMAINING ]]; then
@@ -282,20 +283,48 @@ set -Eeuo pipefail
 /usr/local/sbin/nextcloud-aio-stop-siblings
 systemd-run --quiet --on-active=30m /usr/local/sbin/enoch-swapfile-failsafe >/dev/null
 /usr/local/sbin/enoch-swapfile prepare
+install -d -m 0755 /run/enoch
+touch /run/enoch/snapshot-prepared
 PREP
 chmod 0755 /usr/local/sbin/enoch-prepare-snapshot
+cat >/etc/systemd/system/nextcloud-aio-lifecycle.service <<'LIFECYCLE_UNIT'
+[Unit]
+Description=Nextcloud AIO clean shutdown and snapshot restore startup
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+Before=shutdown.target reboot.target halt.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/bin/rm -f /run/enoch/snapshot-prepared
+ExecStart=/usr/local/sbin/nextcloud-aio-start-siblings
+ExecStop=/usr/local/sbin/nextcloud-aio-stop-siblings
+TimeoutStartSec=25min
+TimeoutStopSec=25min
+
+[Install]
+WantedBy=multi-user.target
+LIFECYCLE_UNIT
+systemctl daemon-reload
+systemctl enable nextcloud-aio-lifecycle.service
 cat >/usr/local/sbin/enoch-aio-control <<'PY'
 #!/usr/bin/env python3
 """Forced SSH command: no shell, no arbitrary arguments, no cloud credentials."""
 import json, os, re, subprocess, sys
 def run(args):
     return subprocess.run(args, text=True, capture_output=True, timeout=8, check=True).stdout.strip()
-def emit(state):
-    print(json.dumps({'state': state})); sys.exit(0)
+def emit(state, version=None):
+    result = {'state': state}
+    if version is not None: result['version'] = version
+    print(json.dumps(result)); sys.exit(0)
 command = os.environ.get('SSH_ORIGINAL_COMMAND', '')
 if command == 'probe':
     required = ('/usr/local/sbin/nextcloud-aio-stop-siblings', '/usr/local/sbin/enoch-activity-heartbeat', '/usr/local/sbin/enoch-prepare-snapshot', '/usr/local/sbin/enoch-swapfile', '/usr/local/sbin/enoch-swapfile-failsafe')
-    emit('installed' if all(os.access(path, os.X_OK) for path in required) else 'failed')
+    try: version = open('/etc/enoch/agent-version').read().strip()
+    except OSError: version = ''
+    emit('installed' if version == '20261022-2' and all(os.access(path, os.X_OK) for path in required) else 'failed', version)
 match = re.fullmatch(r'(prepare|status) ([a-f0-9]{24})', command)
 if not match:
     print('Command not permitted', file=sys.stderr); sys.exit(1)
@@ -327,4 +356,6 @@ chmod 0600 /root/.ssh/authorized_keys
 if ! grep -Fq "$KEY_DATA" /root/.ssh/authorized_keys; then
     printf 'restrict,command="/usr/local/sbin/enoch-aio-control" %s %s enoch-maintenance\n' "$KEY_TYPE" "$KEY_DATA" >>/root/.ssh/authorized_keys
 fi
+printf '%s\n' '20261022-2' >/etc/enoch/agent-version
+chmod 0644 /etc/enoch/agent-version
 echo 'Restricted portal agent installed. No containers were stopped.'

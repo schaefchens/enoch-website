@@ -7,8 +7,10 @@ function check(bool $value,string $label):void{global $checks;if(!$value)throw n
 function refuses(callable $fn):bool{try{$fn();return false;}catch(Throwable){return true;}}
 final class FakeCloud extends Cloud {
     public array $servers=[],$images=[],$calls=[];
+    public array $actions=[];
     public int $nextImageId=21;
-    public bool $missingInitial=false,$unsafeIP=false,$loseSnapshotResponse=false,$loseCreateResponse=false,$rejectSnapshot=false;
+    public bool $missingInitial=false,$unsafeIP=false,$loseSnapshotResponse=false,$loseCreateResponse=false,$losePoweroffResponse=false,$rejectSnapshot=false,$shutdownStuck=false,$poweroffStuck=false;
+    public string $shutdownActionStatus='success';
     public int $capacityRejects=0;
     public ?string $rejectCreateCode=null;
     public array $unavailableTypes=[];
@@ -28,6 +30,7 @@ final class FakeCloud extends Cloud {
         if($method==='GET'){
             $parsed=parse_url($path);$base=$parsed['path'];parse_str($parsed['query']??'',$q);
             if($base==='/servers')return ['servers'=>$this->servers];
+            if(preg_match('#^/servers/[0-9]+/actions/([0-9]+)$#',$base,$m))return ['action'=>$this->actions[(int)$m[1]]??null];
             if(str_starts_with($base,'/primary_ips/'))return ['primary_ip'=>['auto_delete'=>$this->unsafeIP,'assignee_id'=>$this->servers[0]['id']??null,'location'=>['name'=>'fsn1']]];
             if($base==='/images'){
                 $images=$this->images;
@@ -49,8 +52,8 @@ final class FakeCloud extends Cloud {
         }
         if(str_ends_with($path,'/poweron')){$this->servers[0]['status']='running';return ['action'=>['id'=>1]];}
         if(str_ends_with($path,'/change_type')){$this->servers[0]['server_type']['name']=$body['server_type'];if(!empty($body['upgrade_disk']))$this->servers[0]['primary_disk_size']=$this->type($body['server_type'])['disk'];return ['action'=>['id'=>5]];}
-        if(str_ends_with($path,'/shutdown')){$this->servers[0]['status']='off';return ['action'=>['id'=>2]];}
-        if(str_ends_with($path,'/poweroff')){$this->servers[0]['status']='off';return ['action'=>['id'=>6]];}
+        if(str_ends_with($path,'/shutdown')){if(!$this->shutdownStuck)$this->servers[0]['status']='off';$this->actions[2]=['id'=>2,'status'=>$this->shutdownActionStatus,'error'=>$this->shutdownActionStatus==='error'?['message'=>'ACPI rejected']:null];return ['action'=>$this->actions[2]];}
+        if(str_ends_with($path,'/poweroff')){if(!$this->poweroffStuck)$this->servers[0]['status']='off';$this->actions[6]=['id'=>6,'status'=>'success','error'=>null];if($this->losePoweroffResponse)throw new RuntimeException('Lost poweroff response');return ['action'=>$this->actions[6]];}
         if(str_ends_with($path,'/create_image')){
             if($this->rejectSnapshot)throw new RuntimeException('Snapshot failed');
             $i=$this->image($body['labels']);$i['labels']=$body['labels'];$i['description']=$body['description'];$i['id']=$this->nextImageId++;$i['created']=gmdate('c',time()+$i['id']);$this->images[]=$i;
@@ -70,8 +73,8 @@ final class FakeCloud extends Cloud {
 // Hetzner's successful image DELETE is a 204 with no JSON body. FakeCloud
 // returns the equivalent empty array in pruning tests above.
 final class FakeHost extends Host {
-    public string $state='ready';public array $commands=[];public bool $healthy=true;
-    public function command(array $s,string $command):array{$this->commands[]=$command;return ['state'=>$command==='probe'?'installed':$this->state];}
+    public string $state='ready',$agentVersion=Engine::AGENT_VERSION;public array $commands=[];public bool $healthy=true;
+    public function command(array $s,string $command):array{$this->commands[]=$command;return $command==='probe'?['state'=>'installed','version'=>$this->agentVersion]:['state'=>$this->state];}
     public function ready(array $cfg):bool{return $this->healthy;}
 }
 $root=dirname(__DIR__);$private=sys_get_temp_dir().'/enoch-keys-'.bin2hex(random_bytes(8));mkdir($private.'/ssh',0700,true);file_put_contents($private.'/ssh/enoch.pub','ssh-ed25519 AAAA test');putenv('ENOCH_DATA_DIR='.$private);putenv('CRON_KEY='.str_repeat('c',64));putenv('APP_URL=https://enoch.example.org');$config=new Config($root);$dirs=[];
@@ -92,6 +95,24 @@ try{
     check($j['status']==='done'&&deleted($c),'clean stop snapshots before deleting');
     check(array_column($c->calls,1)===['/servers/10/actions/shutdown','/servers/10/actions/create_image','/servers/10'],'cloud mutation order is shutdown, snapshot, delete');
     check(count($c->images)===1,'exactly one snapshot per operation');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];$c->shutdownStuck=true;$e->enqueue('nextcloud','stop','alice',['save_snapshot'=>false,'acknowledge_discard'=>true]);
+    tick($s,$c,$h);tick($s,$c,$h);tick($s,$c,$h);$s->query('UPDATE jobs SET phase_since=?',[time()-181]);
+    for($n=0;$n<6;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&$c->servers===[]&&array_column($c->images,'id')===[20],'disposable stop recovers when a gracefully halted guest remains cloud-running');
+    check(array_column($c->calls,1)===['/servers/10/actions/shutdown','/servers/10/actions/poweroff','/servers/10'],'stuck graceful shutdown is reconciled with one hypervisor power-off before deletion');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];$c->shutdownStuck=true;$c->losePoweroffResponse=true;$e->enqueue('nextcloud','stop','alice',['save_snapshot'=>false,'acknowledge_discard'=>true]);
+    tick($s,$c,$h);tick($s,$c,$h);tick($s,$c,$h);$s->query('UPDATE jobs SET phase_since=?',[time()-181]);
+    for($n=0;$n<7;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&count(array_filter($c->calls,fn($call)=>str_ends_with($call[1],'/poweroff')))===1,'lost hypervisor power-off response reconciles from observed VM state without replay');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->images=[$c->image()];$c->shutdownStuck=true;$e->enqueue('nextcloud','stop','alice');
+    tick($s,$c,$h);tick($s,$c,$h);tick($s,$c,$h);$s->query('UPDATE jobs SET phase_since=?',[time()-301]);
+    for($n=0;$n<10;$n++)$j=tick($s,$c,$h);
+    check($j['status']==='done'&&$c->servers===[]&&count($c->images)===1&&$c->images[0]['id']===21,'prepared Nextcloud save recovers cloud power state and creates one verified snapshot');
+    check(array_column($c->calls,1)===['/servers/10/actions/shutdown','/servers/10/actions/poweroff','/servers/10/actions/create_image','/servers/10','/images/20'],'prepared saved stop powers off before snapshot and deletion');
+    [$s,$c,$h,$e]=fixture();$c->seed();$c->shutdownStuck=true;$c->shutdownActionStatus='error';$e->enqueue('nextcloud','stop','alice');tick($s,$c,$h);tick($s,$c,$h);tick($s,$c,$h);$j=tick($s,$c,$h);
+    check($j['status']==='failed'&&str_contains($j['message'],'ACPI rejected')&&!array_filter($c->calls,fn($call)=>str_ends_with($call[1],'/poweroff')),'failed Hetzner shutdown action is surfaced without forcing or deleting');
+    [$s,$c,$h,$e]=fixture('hpb');$c->seed();$c->shutdownStuck=true;$e->enqueue('hpb','stop','alice');tick($s,$c,$h);tick($s,$c,$h);$s->query('UPDATE jobs SET phase_since=?',[time()-1801]);$j=tick($s,$c,$h);
+    check($j['status']==='failed'&&!array_filter($c->calls,fn($call)=>str_ends_with($call[1],'/poweroff')),'unprepared saved service is never force-powered off for a snapshot');
     [$s,$c,$h,$e]=fixture();$c->seed();$h->state='failed';$e->enqueue('nextcloud','stop','alice');tick($s,$c,$h);$j=tick($s,$c,$h);
     check($j['status']==='failed'&&!$c->calls,'failed AIO stop does not shut down, snapshot or delete');
     check(($s->get('lifecycle:block:nextcloud')['server']??null)===10,'failed stop opens a circuit breaker for the same VM');
@@ -125,6 +146,11 @@ try{
     check($j['status']==='done'&&count($c->calls)===1,'lost create response reconciles using job label and pinned IPs');
     check($c->calls[0][2]['public_net']['ipv4']===$config->services['nextcloud']['ipv4'],'restore uses the persistent addresses');
     check(str_contains($c->calls[0][2]['user_data'],'enoch-activity-heartbeat.timer')&&str_contains($c->calls[0][2]['user_data'],'activity.php')&&!str_contains($c->calls[0][2]['user_data'],str_repeat('c',64)),'restore installs the activity timer without disclosing the scheduler key');
+    check(str_contains($c->calls[0][2]['user_data'],Engine::AGENT_VERSION)&&str_contains($c->calls[0][2]['user_data'],'snapshot-prepared'),'restore carries the exact attested shutdown agent and duplicate-stop marker');
+    [$s,$c,$h,$e]=fixture();$c->seed();$h->agentVersion='old-agent';$e->enqueue('nextcloud','start','alice');tick($s,$c,$h);$j=tick($s,$c,$h);
+    check($j['status']==='active'&&$j['phase']==='ready','start waits for the exact shutdown agent version instead of accepting stale snapshot files');
+    $s->query('UPDATE jobs SET phase_since=?',[time()-901]);$j=tick($s,$c,$h);
+    check($j['status']==='failed'&&!deleted($c),'missing current shutdown agent eventually fails while retaining the VM');
     [$s,$c,$h,$e]=fixture();$c->images=[$c->image()];$c->capacityRejects=1;$e->enqueue('nextcloud','start','alice');for($n=0;$n<7;$n++)$j=tick($s,$c,$h);
     $creates=array_values(array_filter($c->calls,fn($call)=>$call[0]==='POST'&&$call[1]==='/servers'));
     check($j['status']==='done'&&array_column(array_column($creates,2),'server_type')===['cx23','cpx12'],'capacity rejection advances through the configured server type order');

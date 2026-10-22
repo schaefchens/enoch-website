@@ -1,5 +1,5 @@
 'use strict';
-const VERSION='20261022-shutdown-recovery-1';
+const VERSION='20261022-shutdown-recovery-2';
 const CACHE='enoch-static-'+VERSION;
 const ASSETS=[
   '/manifest.webmanifest',

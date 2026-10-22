@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace Enoch;
 
 final class Engine {
+    public const AGENT_VERSION='20261022-2';
     public function __construct(private Config $config,private Store $store,private Cloud $cloud,private Host $host) {}
     public function enqueue(string $service,string $operation,string $actor,array $options=[]): string {
         if(!isset($this->config->services[$service])||!in_array($operation,['start','stop','terminate'],true))throw new \RuntimeException('Unknown service or operation.');
@@ -44,7 +45,7 @@ final class Engine {
             catch(\Throwable $e){
                 // An intent is durable before every cloud write. Its next phase reconciles
                 // observed state, including when PHP died before saving an API response.
-                if(!$e instanceof CloudRejected&&in_array($j['phase'],['creating','resizing','powering','shutting-down','force-powering-off','snapshotting','protecting','deleting'],true)&&time()-(int)$j['phase_since']<120){
+                if(!$e instanceof CloudRejected&&!$e instanceof CloudActionFailed&&in_array($j['phase'],['creating','resizing','powering','shutting-down','hard-powering-off','force-powering-off','snapshotting','protecting','deleting'],true)&&time()-(int)$j['phase_since']<120){
                     $this->store->query('UPDATE jobs SET message=? WHERE id=?',['Checking the result of a cloud request before continuing.',$j['id']]);
                 }else{$this->fail($j,$e->getMessage());}
             }
@@ -163,7 +164,7 @@ final class Engine {
             if($this->host->ready($cfg)){
                 if($cfg['prepare']==='aio'){
                     try{$agent=$this->host->command($s,'probe');}catch(\Throwable $e){if($age>600)throw $e;return;}
-                    if(($agent['state']??'')!=='installed')throw new \RuntimeException('Nextcloud shutdown agent is missing. The VM is retained.');
+                    if(($agent['state']??'')!=='installed'||($agent['version']??'')!==self::AGENT_VERSION){if($age>900)throw new \RuntimeException('The current Nextcloud shutdown agent was not installed. The VM is retained.');return;}
                 }
                 $this->done($j,'Service is online');
             }
@@ -182,11 +183,27 @@ final class Engine {
             $this->cloud->ips($cfg,$s);
             if($cfg['prepare']==='aio'&&($this->host->command($s,'status '.$j['id'])['state']??'')!=='ready')throw new \RuntimeException('Nextcloud is no longer stopped. Refusing VM shutdown.');
             $this->advance($j,'shutting-down','Waiting for graceful VM shutdown');
-            $this->cloud->request('POST','/servers/'.$s['id'].'/actions/shutdown');return;
+            $response=$this->cloud->request('POST','/servers/'.$s['id'].'/actions/shutdown');
+            if(isset($response['action']['id']))$this->advance($j,'shutting-down','Graceful shutdown requested; waiting for VM power state',['shutdown_action'=>$response['action']['id']]);return;
         case 'shutting-down':
             if(!$s)throw new \RuntimeException('Server disappeared before the snapshot.');
             if($s['status']==='off')$this->advance($j,'snapshot','VM is off; preparing a snapshot');
-            elseif($age>1800)throw new \RuntimeException('Graceful shutdown was not confirmed. No forced power-off or deletion was attempted.');return;
+            else {
+                $action=$this->action($j,$s,'shutdown_action','graceful shutdown');
+                $canRecover=!$save||$cfg['prepare']==='aio';$grace=$save?300:180;
+                if($canRecover&&$age>$grace&&(!$action||($action['status']??'')==='success')&&$s['status']==='running'){
+                    $this->cloud->ips($cfg,$s);
+                    $this->advance($j,'hard-powering-off','Guest shutdown completed without a cloud power-state change; forcing hypervisor power off');
+                    $response=$this->cloud->request('POST','/servers/'.$s['id'].'/actions/poweroff');
+                    if(isset($response['action']['id']))$this->advance($j,'hard-powering-off','Waiting for forced hypervisor power off',['poweroff_action'=>$response['action']['id']]);return;
+                }
+                if($age>1800)throw new \RuntimeException('Graceful shutdown was not confirmed. No deletion was attempted.');
+            }return;
+        case 'hard-powering-off':
+            if(!$s)throw new \RuntimeException('Server disappeared before the snapshot.');
+            if($s['status']==='off'){$this->advance($j,'snapshot','Hypervisor power-off confirmed; preparing snapshot policy');return;}
+            $this->action($j,$s,'poweroff_action','forced hypervisor power-off');
+            if($age>300)throw new \RuntimeException('Forced hypervisor power-off was not confirmed. No snapshot or deletion was attempted.');return;
         case 'force-powering-off':
             if(!$s){$this->done($j,'VM terminated; previous snapshots retained');return;}
             if($s['status']==='off'){$this->advance($j,'delete','Forced power-off confirmed; previous snapshot verified');return;}
@@ -245,6 +262,16 @@ final class Engine {
             if(!$life->pruneOne($cfg,(int)$j['data']['image']))$this->done($j,isset($j['data']['checkpoint_name'])?'Protected checkpoint saved; server stopped':'Stopped and saved; initial, current and protected checkpoint snapshots retained');return;
         default:throw new \RuntimeException('Unknown operation phase.');
         }
+    }
+    private function action(array $j,array $server,string $key,string $label):?array {
+        $id=$j['data'][$key]??null;if(!$id)return null;
+        $action=$this->cloud->request('GET','/servers/'.$server['id'].'/actions/'.(int)$id)['action']??null;
+        if(!$action)throw new \RuntimeException('Hetzner did not return the '.$label.' action.');
+        if(($action['status']??'')==='error'){
+            $detail=$action['error']['message']??$action['error']['code']??'unknown error';
+            throw new CloudActionFailed('Hetzner '.$label.' failed: '.$detail);
+        }
+        return $action;
     }
     public function abandon(string $id,string $actor):void {
         $this->store->locked(function()use($id,$actor){
